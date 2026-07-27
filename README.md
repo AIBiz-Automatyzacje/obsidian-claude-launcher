@@ -134,12 +134,15 @@ Znajdziesz je w **Ustawienia** → **Claude Code Launcher**.
 
 | Ustawienie | Domyślnie | Do czego służy |
 |---|---|---|
+| **Po kliknięciu ikonki uruchomi się** | — | Podgląd polecenia, które faktycznie poleci. Aktualizuje się na żywo |
 | **Polecenie** | `claude` | Co ma się uruchomić w terminalu. Wpisz tu np. `claude --model opus`, jeśli chcesz startować z konkretnym modelem |
-| **Pomiń pytania o uprawnienia** | wyłączone | Dokłada flagę `--dangerously-skip-permissions` |
+| **Tryb bypass permissions** | wyłączone | Dokłada flagę `--dangerously-skip-permissions` |
 | **Katalog startowy** | katalog vaulta | Druga opcja to folder notatki, którą masz akurat otwartą |
 | **Utwórz / odśwież profil** | — | Przepisuje powyższe ustawienia do profilu w Terminalu od razu, bez otwierania sesji |
 
-### Zanim włączysz pomijanie uprawnień
+Zmiana działa od następnego kliknięcia ikonki, bez restartu Obsidiana.
+
+### Zanim włączysz tryb bypass permissions
 
 Domyślnie Claude Code pyta o zgodę, zanim zmieni plik albo uruchomi komendę w terminalu. Flaga `--dangerously-skip-permissions` wyłącza te pytania, przez co Claude może modyfikować i kasować pliki w Twoim vaultcie bez ostrzeżenia.
 

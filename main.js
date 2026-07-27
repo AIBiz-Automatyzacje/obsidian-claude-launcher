@@ -300,6 +300,13 @@ class ClaudeLauncherSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    const preview = new Setting(containerEl).setName('Po kliknięciu ikonki uruchomi się');
+    const previewValue = preview.descEl.createEl('code');
+    const refreshPreview = () => {
+      previewValue.setText(fullCommand(this.plugin.settings));
+    };
+    refreshPreview();
+
     new Setting(containerEl)
       .setName('Polecenie')
       .setDesc('Co ma się odpalić w terminalu. Domyślnie: claude')
@@ -309,19 +316,22 @@ class ClaudeLauncherSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.command)
           .onChange(async (value) => {
             this.plugin.settings.command = value;
+            refreshPreview();
             await this.plugin.saveSettings();
           })
       );
 
     new Setting(containerEl)
-      .setName('Pomiń pytania o uprawnienia')
+      .setName('Tryb bypass permissions')
       .setDesc(
-        'Dokłada --dangerously-skip-permissions. Claude przestaje pytać o zgodę przed każdą operacją ' +
-          'na plikach i komendach. Włączaj tylko na własnym komputerze i w vaultcie, któremu ufasz.'
+        'Dokłada flagę --dangerously-skip-permissions, czyli to samo, co tryb bypass permissions ' +
+          'w Claude Code. Claude przestaje pytać o zgodę przed każdą zmianą pliku i każdą komendą. ' +
+          'Wyłącz, jeśli wolisz startować ze zwykłymi pytaniami o uprawnienia.'
       )
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.skipPermissions).onChange(async (value) => {
           this.plugin.settings.skipPermissions = value;
+          refreshPreview();
           await this.plugin.saveSettings();
         })
       );
