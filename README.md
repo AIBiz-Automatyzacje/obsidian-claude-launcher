@@ -77,13 +77,27 @@ Włączaj **tylko** na własnym komputerze, w vaultcie, który masz zbackupowany
 | Ikonka nic nie robi | Otwórz konsolę (`Cmd/Ctrl + Shift + I`) i poszukaj wpisów `[claude-launcher]`. |
 | Windows: obok Obsidiana otwiera się osobne czarne okno konsoli | Profil sprzed aktualizacji. Zaktualizuj plugin i kliknij **Utwórz / odśwież profil** w jego ustawieniach. |
 | Windows: `Input must be provided either through stdin…` | To samo — odśwież profil. Claude dostał wtedy sesję bez konsoli i wszedł w tryb `--print`. |
-| Windows: `Terminal resizer exited unexpectedly: 9009` | To samo. Terminal szukał `python3`, którego na Windowsie nie ma. Launcher nie używa resizera. |
+| Windows: `Terminal resizer exited unexpectedly: 9009` | Terminal szukał `python3`, którego na Windowsie nie ma. Zaktualizuj plugin i odśwież profil. |
+| Windows: tekst w terminalu połamany, ramki rozjechane | Brakuje Pythona z `psutil` i `pywinctl` — patrz sekcja niżej. |
 
-### Windows — czego brakuje
+### Windows — doinstaluj Pythona, inaczej terminal wygląda źle
 
-Sesja na Windowsie jedzie przez `conhost.exe` z ukrytym oknem, bez resizera konsoli (ten wymaga Pythona i wymusza pokazanie okna). Efekt uboczny: **konsola nie skaluje się do szerokości panelu** — jeśli zwęzisz panel w Obsidianie, Claude o tym nie wie.
+Sesja na Windowsie jedzie przez `conhost.exe`, a oknem tej konsoli steruje pomocniczy skrypt Pythona wbudowany w plugin Terminal. Ten skrypt robi dwie rzeczy: **chowa okno konsoli** i **skaluje ją do szerokości panelu** Obsidiana.
 
-Chcesz skalowanie i nie przeszkadza Ci dodatkowe okno? Zainstaluj Pythona i w ustawieniach pluginu Terminal wpisz go w polu *Python executable* profilu **Claude Code**. Pamiętaj, że przycisk *Utwórz / odśwież profil* w Launcherze przywróci wtedy ustawienie domyślne.
+Bez niego okno wprawdzie się nie pokaże, ale konsola zostanie na sztywnym rozmiarze — tekst zacznie się łamać w losowych miejscach, a ramki interfejsu Claude'a rozjadą się na kawałki.
+
+Żeby to działało:
+
+1. Zainstaluj Pythona z [python.org](https://www.python.org/downloads/windows/) (zaznacz *Add python.exe to PATH*).
+2. W PowerShellu wykonaj:
+   ```
+   pip install psutil pywinctl
+   ```
+3. W Obsidianie: ustawienia **Claude Code Launcher** → **Utwórz / odśwież profil**.
+
+Launcher sam znajdzie interpreter (`py`, `python`, `python3`) i sprawdzi, czy ma potrzebne biblioteki. Jak nie znajdzie, powie o tym powiadomieniem i po prostu wystartuje bez skalowania.
+
+Na macOS i Linuksie nic nie robisz — tam Python jest częścią systemu.
 
 ## Licencja
 

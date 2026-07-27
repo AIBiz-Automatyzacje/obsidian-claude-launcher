@@ -31,9 +31,36 @@ function fullCommand(settings) {
   return `${settings.command.trim() || 'claude'}${flags}`;
 }
 
+const WINDOWS_PYTHON_CANDIDATES = ['py', 'python', 'python3'];
+
+// Na Windowsie resizer Terminala robi dwie rzeczy naraz: chowa okno conhosta
+// (`window.hide(True)`) i skaluje konsolę do rozmiaru panelu. Napędza go Python
+// z psutil + pywinctl. Szukamy interpretera, który ma jedno i drugie — bez tego
+// Terminal startuje z windowsHide i okno też nie będzie widoczne, ale konsola
+// zostanie na sztywnym rozmiarze i tekst zacznie się łamać.
+async function detectWindowsPython() {
+  const { execFile } = require('child_process');
+  for (const executable of WINDOWS_PYTHON_CANDIDATES) {
+    const usable = await new Promise((resolve) => {
+      try {
+        execFile(
+          executable,
+          ['-c', 'import psutil, pywinctl'],
+          { windowsHide: true, timeout: 15000 },
+          (error) => resolve(!error)
+        );
+      } catch (error) {
+        resolve(false);
+      }
+    });
+    if (usable) return executable;
+  }
+  return '';
+}
+
 // Kształt profilu 1:1 z tym, co plugin Terminal zapisuje w swoim data.json.
 // Po wyjściu z Claude'a zostajemy w shellu (exec zsh / -NoExit), żeby terminal nie znikał.
-function buildProfile(settings) {
+function buildProfile(settings, pythonExecutable) {
   const platform = currentPlatform();
   const command = fullCommand(settings);
   const base = {
@@ -41,7 +68,7 @@ function buildProfile(settings) {
     followTheme: true,
     name: PROFILE_NAME,
     platforms: { [platform]: true },
-    pythonExecutable: 'python3',
+    pythonExecutable,
     restoreHistory: false,
     rightClickAction: 'copyPaste',
     successExitCodes: ['0', 'SIGINT', 'SIGTERM'],
@@ -50,23 +77,14 @@ function buildProfile(settings) {
     useWin32Conhost: true,
   };
 
-  // Windows, dwie flagi, które muszą chodzić w parze:
-  //
-  // useWin32Conhost — jedyne źródło prawdziwej konsoli. Terminal zawsze spawnuje ze
-  //   `stdio: pipe`, więc bez conhosta proces nie ma TTY i Claude przechodzi w tryb
-  //   --print („Input must be provided either through stdin…"). Musi zostać włączone.
-  //
-  // pythonExecutable — na Windowsie Python napędza wyłącznie resizer konsoli i jest
-  //   opcjonalny. Terminal spawnuje z `windowsHide: !resizer`, więc dopóki resizer żyje,
-  //   okno conhosta JEST WIDOCZNE obok panelu Obsidiana. Pusty string ubija resizera,
-  //   dzięki czemu okno chowa się, a sesja zostaje tylko w Obsidianie.
-  //   Koszt: konsola nie skaluje się do rozmiaru panelu.
+  // useWin32Conhost to na Windowsie jedyne źródło prawdziwej konsoli — Terminal zawsze
+  // spawnuje ze `stdio: pipe`, więc bez conhosta proces nie ma TTY i Claude przechodzi
+  // w tryb --print („Input must be provided either through stdin…").
   if (platform === 'win32') {
     return {
       ...base,
       executable: 'powershell.exe',
       args: ['-NoExit', '-Command', command],
-      pythonExecutable: '',
       useWin32Conhost: true,
     };
   }
@@ -83,6 +101,8 @@ function buildProfile(settings) {
 module.exports = class ClaudeLauncher extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.pythonExecutable = undefined;
+    this.warnedAboutPython = false;
 
     addIcon('claude-mascot', MASCOT);
 
@@ -108,6 +128,25 @@ module.exports = class ClaudeLauncher extends Plugin {
   terminalPlugin() {
     const plugins = this.app.plugins;
     return plugins && plugins.plugins ? plugins.plugins[TERMINAL_PLUGIN_ID] : null;
+  }
+
+  // Na Unixach Terminal bez Pythona w ogóle nie postawi pseudoterminala, więc podajemy
+  // go na sztywno. Na Windowsie jest opcjonalny — wykrywamy raz na sesję, bo sprawdzenie
+  // kosztuje kilka uruchomień interpretera.
+  async resolvePython() {
+    if (currentPlatform() !== 'win32') return 'python3';
+    if (this.pythonExecutable === undefined) {
+      this.pythonExecutable = await detectWindowsPython();
+    }
+    if (!this.pythonExecutable && !this.warnedAboutPython) {
+      this.warnedAboutPython = true;
+      new Notice(
+        'Claude Code Launcher: terminal nie będzie dopasowywał się do szerokości panelu. ' +
+          'Żeby to naprawić, zainstaluj Pythona i wykonaj: pip install psutil pywinctl',
+        12000
+      );
+    }
+    return this.pythonExecutable;
   }
 
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
@@ -141,7 +180,7 @@ module.exports = class ClaudeLauncher extends Plugin {
     }
 
     const previous = settings.value.defaultProfile;
-    const profile = buildProfile(this.settings);
+    const profile = buildProfile(this.settings, await this.resolvePython());
 
     try {
       await settings.mutate((draft) => {
@@ -247,6 +286,10 @@ class ClaudeLauncherSettingTab extends PluginSettingTab {
             new Notice('Plugin Terminal nie jest włączony.', 8000);
             return;
           }
+          // Wymuszamy ponowne szukanie Pythona — ktoś mógł go doinstalować
+          // właśnie po to, żeby kliknąć ten przycisk.
+          this.plugin.pythonExecutable = undefined;
+          this.plugin.warnedAboutPython = false;
           await this.plugin.installProfile(terminal, false);
           new Notice('Profil „Claude Code" zapisany w pluginie Terminal.');
         })
