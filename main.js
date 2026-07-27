@@ -50,15 +50,24 @@ function buildProfile(settings) {
     useWin32Conhost: true,
   };
 
-  // useWin32Conhost każe Terminalowi przepuścić proces przez conhost.exe, co na Windowsie
-  // otwiera osobne okno konsoli sklejone z sesją w Obsidianie. Domyślka Terminala to `true`,
-  // my chcemy `false` — sesja ma żyć wyłącznie w panelu Obsidiana.
+  // Windows, dwie flagi, które muszą chodzić w parze:
+  //
+  // useWin32Conhost — jedyne źródło prawdziwej konsoli. Terminal zawsze spawnuje ze
+  //   `stdio: pipe`, więc bez conhosta proces nie ma TTY i Claude przechodzi w tryb
+  //   --print („Input must be provided either through stdin…"). Musi zostać włączone.
+  //
+  // pythonExecutable — na Windowsie Python napędza wyłącznie resizer konsoli i jest
+  //   opcjonalny. Terminal spawnuje z `windowsHide: !resizer`, więc dopóki resizer żyje,
+  //   okno conhosta JEST WIDOCZNE obok panelu Obsidiana. Pusty string ubija resizera,
+  //   dzięki czemu okno chowa się, a sesja zostaje tylko w Obsidianie.
+  //   Koszt: konsola nie skaluje się do rozmiaru panelu.
   if (platform === 'win32') {
     return {
       ...base,
       executable: 'powershell.exe',
       args: ['-NoExit', '-Command', command],
-      useWin32Conhost: false,
+      pythonExecutable: '',
+      useWin32Conhost: true,
     };
   }
 

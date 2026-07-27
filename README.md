@@ -75,7 +75,15 @@ Włączaj **tylko** na własnym komputerze, w vaultcie, który masz zbackupowany
 | „Plugin Terminal nie udostępnia komend" | W ustawieniach Terminala włącz *Add to command palette*. |
 | Terminal się otwiera, ale wyskakuje `command not found: claude` | Claude Code nie jest w `PATH`. Sprawdź `which claude` w zwykłym terminalu i doinstaluj, jeśli trzeba. |
 | Ikonka nic nie robi | Otwórz konsolę (`Cmd/Ctrl + Shift + I`) i poszukaj wpisów `[claude-launcher]`. |
-| Windows: obok Obsidiana otwiera się osobne czarne okno konsoli | Masz starą wersję pluginu albo profil sprzed aktualizacji. Zaktualizuj do 1.1.1 i w ustawieniach Launchera kliknij **Utwórz / odśwież profil**. |
+| Windows: obok Obsidiana otwiera się osobne czarne okno konsoli | Profil sprzed aktualizacji. Zaktualizuj plugin i kliknij **Utwórz / odśwież profil** w jego ustawieniach. |
+| Windows: `Input must be provided either through stdin…` | To samo — odśwież profil. Claude dostał wtedy sesję bez konsoli i wszedł w tryb `--print`. |
+| Windows: `Terminal resizer exited unexpectedly: 9009` | To samo. Terminal szukał `python3`, którego na Windowsie nie ma. Launcher nie używa resizera. |
+
+### Windows — czego brakuje
+
+Sesja na Windowsie jedzie przez `conhost.exe` z ukrytym oknem, bez resizera konsoli (ten wymaga Pythona i wymusza pokazanie okna). Efekt uboczny: **konsola nie skaluje się do szerokości panelu** — jeśli zwęzisz panel w Obsidianie, Claude o tym nie wie.
+
+Chcesz skalowanie i nie przeszkadza Ci dodatkowe okno? Zainstaluj Pythona i w ustawieniach pluginu Terminal wpisz go w polu *Python executable* profilu **Claude Code**. Pamiętaj, że przycisk *Utwórz / odśwież profil* w Launcherze przywróci wtedy ustawienie domyślne.
 
 ## Licencja
 
