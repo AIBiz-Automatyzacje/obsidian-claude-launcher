@@ -1,0 +1,10 @@
+{
+  "id": "claude-launcher",
+  "name": "Claude Code Launcher",
+  "version": "1.1.0",
+  "minAppVersion": "1.4.11",
+  "description": "Przycisk w ribbonie z maskotką Claude Code — odpala nową sesję Claude Code w terminalu wewnątrz Obsidiana.",
+  "author": "Kacper Trzepieciński (AIBIZ)",
+  "authorUrl": "https://akademiaautomatyzacji.com",
+  "isDesktopOnly": true
+}
