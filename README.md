@@ -17,23 +17,34 @@ Dostępne też z palety komend: **Otwórz nową sesję Claude Code**.
 2. **Plugin [Terminal](https://github.com/polyipseity/obsidian-terminal)** (polyipseity) — zainstalowany i włączony. To on rysuje terminal, Launcher tylko go odpala.
 3. **Claude Code** zainstalowany i dostępny w `PATH` (sprawdź: `which claude` w terminalu).
 
-## Instalacja
+## Instalacja — przez BRAT (zalecane)
 
-### Ręcznie (zip z Releases)
+Wszystko klikasz w Obsidianie, nic nie kopiujesz do folderów. Aktualizacje przychodzą same.
+
+1. Obsidian → **Ustawienia** → **Dodatki** (Community plugins) → **Przeglądaj** → wyszukaj **BRAT** → *Install* → *Enable*.
+2. Otwórz paletę komend (`Cmd/Ctrl + P`) i wpisz **BRAT: Add a beta plugin for testing**.
+3. W polu adresu wklej:
+   ```
+   AIBiz-Automatyzacje/obsidian-claude-launcher
+   ```
+4. Zostaw *Latest version*, kliknij **Add Plugin**.
+5. Wróć na listę dodatków i włącz **Claude Code Launcher**.
+
+Ikonka z maskotką pojawi się w lewym pasku. BRAT sam podciągnie kolejne wersje.
+
+> Nie masz jeszcze pluginu **Terminal**? Zainstaluj go tak samo jak BRAT w kroku 1 — Launcher bez niego nie ruszy.
+
+<details>
+<summary>Instalacja ręczna (bez BRAT)</summary>
 
 1. Pobierz `claude-launcher.zip` z [ostatniego release'u](../../releases/latest).
 2. Rozpakuj do `<twój-vault>/.obsidian/plugins/` — ma powstać folder `claude-launcher` z plikami `main.js` i `manifest.json`.
-3. Obsidian → Ustawienia → Dodatki (Community plugins) → odśwież listę → włącz **Claude Code Launcher**.
+3. Obsidian → Ustawienia → Dodatki → odśwież listę → włącz **Claude Code Launcher**.
 
-> Folder `.obsidian` jest ukryty. Na macOS pokażesz go w Finderze skrótem `Cmd + Shift + .`
+Folder `.obsidian` jest ukryty. Na macOS pokażesz go w Finderze skrótem `Cmd + Shift + .`, na Windowsie zaznacz *Ukryte elementy* w zakładce Widok.
 
-### Przez BRAT (z automatycznymi aktualizacjami)
-
-1. Zainstaluj plugin **BRAT** (Obsidian42 - BRAT) z listy Community plugins.
-2. BRAT → *Add beta plugin* → wklej: `AIBiz-Automatyzacje/obsidian-claude-launcher`
-3. Włącz **Claude Code Launcher** na liście dodatków.
-
-BRAT sam podciągnie kolejne wersje.
+Tą drogą aktualizacje trzeba wgrywać ręcznie.
+</details>
 
 ## Pierwsze uruchomienie
 
