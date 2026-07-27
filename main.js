@@ -119,6 +119,73 @@ module.exports = class ClaudeLauncher extends Plugin {
     });
 
     this.addSettingTab(new ClaudeLauncherSettingTab(this.app, this));
+
+    // Capture, żeby wyprzedzić handler klawiszy xterma, który zamienia Ctrl+V
+    // na znak sterujący 0x16 zamiast wkleić schowek.
+    if (currentPlatform() !== 'darwin') {
+      this.registerDomEvent(document, 'keydown', (event) => this.handleClipboardKey(event), {
+        capture: true,
+      });
+    }
+  }
+
+  // Znajduje instancję xterma w widoku, w którym siedzi zdarzenie. Chodzimy po
+  // liściach zamiast po typie widoku, bo plugin Terminal nadaje mu nazwę zależną
+  // od własnego kontekstu.
+  terminalFromEvent(event) {
+    const target = event.target;
+    if (!(target instanceof Node)) return null;
+    let found = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (found) return;
+      const view = leaf.view;
+      const terminal = view && view.emulator ? view.emulator.terminal : null;
+      if (!terminal || !view.containerEl || !view.containerEl.contains(target)) return;
+      found = terminal;
+    });
+    return found;
+  }
+
+  handleClipboardKey(event) {
+    if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+
+    const key = event.code === 'KeyV' || event.code === 'KeyC' ? event.code : null;
+    if (!key) return;
+
+    const terminal = this.terminalFromEvent(event);
+    if (!terminal) return;
+
+    if (key === 'KeyV') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.pasteInto(terminal);
+      return;
+    }
+
+    // Ctrl+C bez zaznaczenia musi zostać przerwaniem procesu, inaczej nie da się
+    // ubić tego, co akurat chodzi w terminalu.
+    if (!terminal.hasSelection()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.copyFrom(terminal);
+  }
+
+  async pasteInto(terminal) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) terminal.paste(text);
+    } catch (error) {
+      console.error('[claude-launcher] nie udało się wkleić ze schowka', error);
+    }
+  }
+
+  async copyFrom(terminal) {
+    try {
+      await navigator.clipboard.writeText(terminal.getSelection());
+      terminal.clearSelection();
+    } catch (error) {
+      console.error('[claude-launcher] nie udało się skopiować zaznaczenia', error);
+    }
   }
 
   async saveSettings() {

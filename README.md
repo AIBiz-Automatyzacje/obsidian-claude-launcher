@@ -28,6 +28,7 @@ Po instalacji w lewym pasku Obsidiana pojawia się ikonka z maskotką Claude Cod
 - Sesja startuje w katalogu vaulta (możesz to zmienić na folder aktualnie otwartej notatki).
 - Po wyjściu z Claude'a zostaje otwarta powłoka, więc terminal nie zamyka się w połowie roboty.
 - Możesz mieć kilka sesji naraz, każdą w osobnej zakładce.
+- **Ctrl+C i Ctrl+V działają tak, jak się spodziewasz** (Windows i Linux). Sam plugin Terminal tego nie potrafi, bo w jego mapowaniach klawiszy nie ma nawet akcji „wklej".
 - To samo znajdziesz w palecie komend pod nazwą **Otwórz nową sesję Claude Code**, więc da się podpiąć pod skrót klawiszowy.
 
 Plugin sam zakłada sobie profil w pluginie Terminal. Nie musisz niczego konfigurować ręcznie ani wchodzić w ustawienia Terminala.
@@ -145,6 +146,16 @@ Domyślnie Claude Code pyta o zgodę, zanim zmieni plik albo uruchomi komendę w
 Włączaj ją tylko na własnym komputerze i w vaultcie, który masz zbackupowany. Na sprzęcie firmowym albo w vaultcie z danymi, których nie odtworzysz, lepiej tego nie ruszać.
 
 ---
+
+## Kopiowanie i wklejanie
+
+Na Windowsie i Linuksie **Ctrl+V wkleja, a Ctrl+C kopiuje zaznaczony tekst**. Plugin przejmuje te dwa skróty w oknie terminala i obsługuje je sam.
+
+Jeden wyjątek jest celowy: **Ctrl+C bez zaznaczenia przerywa uruchomiony program**, tak jak w każdym terminalu. Inaczej nie dałoby się zatrzymać tego, co akurat chodzi. Chcesz skopiować, więc najpierw zaznacz myszą.
+
+Działa też prawy przycisk myszy: z zaznaczeniem kopiuje, bez zaznaczenia wkleja.
+
+Na macOS nic nie zmieniamy, bo Cmd+C i Cmd+V działają tam od zawsze.
 
 ## Aktualizacje
 
