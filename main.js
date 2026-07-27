@@ -50,8 +50,16 @@ function buildProfile(settings) {
     useWin32Conhost: true,
   };
 
+  // useWin32Conhost każe Terminalowi przepuścić proces przez conhost.exe, co na Windowsie
+  // otwiera osobne okno konsoli sklejone z sesją w Obsidianie. Domyślka Terminala to `true`,
+  // my chcemy `false` — sesja ma żyć wyłącznie w panelu Obsidiana.
   if (platform === 'win32') {
-    return { ...base, executable: 'powershell.exe', args: ['-NoExit', '-Command', command] };
+    return {
+      ...base,
+      executable: 'powershell.exe',
+      args: ['-NoExit', '-Command', command],
+      useWin32Conhost: false,
+    };
   }
 
   const shell = platform === 'darwin' ? '/bin/zsh' : '/bin/bash';

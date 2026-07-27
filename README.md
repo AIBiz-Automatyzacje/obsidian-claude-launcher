@@ -75,6 +75,7 @@ Włączaj **tylko** na własnym komputerze, w vaultcie, który masz zbackupowany
 | „Plugin Terminal nie udostępnia komend" | W ustawieniach Terminala włącz *Add to command palette*. |
 | Terminal się otwiera, ale wyskakuje `command not found: claude` | Claude Code nie jest w `PATH`. Sprawdź `which claude` w zwykłym terminalu i doinstaluj, jeśli trzeba. |
 | Ikonka nic nie robi | Otwórz konsolę (`Cmd/Ctrl + Shift + I`) i poszukaj wpisów `[claude-launcher]`. |
+| Windows: obok Obsidiana otwiera się osobne czarne okno konsoli | Masz starą wersję pluginu albo profil sprzed aktualizacji. Zaktualizuj do 1.1.1 i w ustawieniach Launchera kliknij **Utwórz / odśwież profil**. |
 
 ## Licencja
 
