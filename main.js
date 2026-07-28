@@ -89,12 +89,16 @@ function buildProfile(settings, pythonExecutable) {
     };
   }
 
+  // -i jest tu równie ważne co --login: shell odpalony samym `--login -c` jest
+  // nieinteraktywny, więc pomija ~/.zshrc (i pośrednio ~/.bashrc). A to tam instalator
+  // Claude Code i nvm dopisują PATH — bez tego sesja wita użytkownika komunikatem
+  // „command not found: claude", mimo że w zwykłym terminalu komenda działa.
   const shell = platform === 'darwin' ? '/bin/zsh' : '/bin/bash';
   const reenter = platform === 'darwin' ? 'exec zsh' : 'exec bash';
   return {
     ...base,
     executable: shell,
-    args: ['--login', '-c', `CLAUDE_CODE_NO_FLICKER=1 ${command}; ${reenter}`],
+    args: ['--login', '-i', '-c', `CLAUDE_CODE_NO_FLICKER=1 ${command}; ${reenter}`],
   };
 }
 
