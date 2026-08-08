@@ -15,6 +15,56 @@ const DEFAULT_SETTINGS = {
   cwd: 'root',
 };
 
+// Terminal domyślnie startuje z followTheme, czyli podmienia paletę ANSI kolorami
+// motywu Obsidiana. Efekt: u każdego kursanta te same sekwencje kolorów wychodzą
+// inaczej, a przy motywach z jasnym tłem bloki Claude'a tracą ciemne podświetlenie.
+// Dlatego wyłączamy followTheme i podajemy własną, stałą paletę.
+const TERMINAL_THEME = {
+  background: '#1a1a1a',
+  foreground: '#d4d4d4',
+  cursor: '#d4d4d4',
+  cursorAccent: '#1a1a1a',
+  selectionBackground: '#3a4a5a',
+  black: '#1a1a1a',
+  red: '#e06c75',
+  green: '#98c379',
+  yellow: '#e5c07b',
+  blue: '#61afef',
+  magenta: '#c678dd',
+  cyan: '#56b6c2',
+  white: '#d4d4d4',
+  brightBlack: '#5c6370',
+  brightRed: '#e06c75',
+  brightGreen: '#98c379',
+  brightYellow: '#e5c07b',
+  brightBlue: '#61afef',
+  brightMagenta: '#c678dd',
+  brightCyan: '#56b6c2',
+  brightWhite: '#ffffff',
+};
+
+// Opcje lecą surowe do konstruktora xterma. fontFamily jest tu najważniejsze:
+// bez niego terminal dziedziczy czcionkę z motywu Obsidiana, a jeśli ta nie ma
+// stałej szerokości znaku, cała siatka terminala rozjeżdża się i tekst nachodzi
+// na siebie. minimumContrastRatio: 1 wyłącza automatyczne „poprawianie" kolorów
+// przez xterm, żeby paleta wyżej była tym, co użytkownik faktycznie widzi.
+const TERMINAL_OPTIONS = {
+  documentOverride: null,
+  fontFamily: '"Cascadia Mono", Consolas, Menlo, "DejaVu Sans Mono", monospace',
+  fontSize: 13,
+  lineHeight: 1.1,
+  letterSpacing: 0,
+  minimumContrastRatio: 1,
+  drawBoldTextInBrightColors: true,
+  scrollback: 5000,
+  theme: TERMINAL_THEME,
+};
+
+// Fallbackowy rozmiar konsoli, gdy nie da się zmierzyć panelu. Lepszy punkt
+// startowy niż domyślne 80x25 conhosta, na którym TUI Claude'a się łamie.
+const FALLBACK_CONSOLE_SIZE = { cols: 120, rows: 30 };
+const CONSOLE_SIZE_LIMITS = { minCols: 60, maxCols: 240, minRows: 20, maxRows: 80 };
+
 function currentPlatform() {
   const fromProcess = typeof process !== 'undefined' ? process.platform : null;
   if (fromProcess === 'darwin' || fromProcess === 'win32' || fromProcess === 'linux') {
@@ -31,48 +81,140 @@ function fullCommand(settings) {
   return `${settings.command.trim() || 'claude'}${flags}`;
 }
 
-const WINDOWS_PYTHON_CANDIDATES = ['py', 'python', 'python3'];
+// Na Windowsie Claude siedzi w conhoście, a plugin Terminal skaluje go pomocniczym
+// skryptem Pythona (psutil + pywinctl). Kto nie ma Pythona z tymi bibliotekami — a
+// to domyślny stan świeżego Windowsa — dostaje terminal, w którym xterm dopasowuje
+// się do panelu, a konsola zostaje na 80 kolumnach. Claude rysuje wtedy interfejs
+// dla jednej szerokości, xterm wyświetla go w innej i ramki lądują w losowych
+// miejscach. Zamiast wymagać instalacji Pythona robimy to samo w PowerShellu,
+// który jest na każdym Windowsie.
+//
+// Protokół jest nasz własny (Terminal ma swój, ale jest przywiązany do `-c` Pythona):
+// pierwsza linia na stdin to PID procesu konsoli, każda kolejna to `KOLUMNYxWIERSZE`.
+const RESIZER_PS = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ClResizer {
+  [StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct SMALL_RECT { public short Left, Top, Right, Bottom; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool FreeConsole();
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleScreenBufferSize(IntPtr h, COORD size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleWindowInfo(IntPtr h, bool absolute, ref SMALL_RECT r);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+  static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
 
-// Na Windowsie resizer Terminala robi dwie rzeczy naraz: chowa okno conhosta
-// (`window.hide(True)`) i skaluje konsolę do rozmiaru panelu. Napędza go Python
-// z psutil + pywinctl. Szukamy interpretera, który ma jedno i drugie — bez tego
-// Terminal startuje z windowsHide i okno też nie będzie widoczne, ale konsola
-// zostanie na sztywnym rozmiarze i tekst zacznie się łamać.
-async function detectWindowsPython() {
-  const { execFile } = require('child_process');
-  for (const executable of WINDOWS_PYTHON_CANDIDATES) {
-    const usable = await new Promise((resolve) => {
-      try {
-        execFile(
-          executable,
-          ['-c', 'import psutil, pywinctl'],
-          { windowsHide: true, timeout: 15000 },
-          (error) => resolve(!error)
-        );
-      } catch (error) {
-        resolve(false);
-      }
-    });
-    if (usable) return executable;
+  // Std handles procesu wskazują na pipe'y od spawna, nie na konsolę, do której
+  // się właśnie podłączyliśmy. Uchwyt konsoli bierzemy więc przez CONOUT$.
+  public static bool Resize(uint pid, short cols, short rows) {
+    FreeConsole();
+    if (!AttachConsole(pid)) return false;
+    IntPtr h = IntPtr.Zero;
+    try {
+      h = CreateFile("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+      if (h == IntPtr.Zero || h == new IntPtr(-1)) return false;
+      // Bufor nie może być mniejszy od okna, więc najpierw ściągamy okno do
+      // minimum, potem ustawiamy bufor, a na końcu rozciągamy okno na docelowy rozmiar.
+      SMALL_RECT tiny = new SMALL_RECT();
+      tiny.Left = 0; tiny.Top = 0; tiny.Right = 0; tiny.Bottom = 0;
+      SetConsoleWindowInfo(h, true, ref tiny);
+      COORD size; size.X = cols; size.Y = rows;
+      if (!SetConsoleScreenBufferSize(h, size)) return false;
+      SMALL_RECT win = new SMALL_RECT();
+      win.Left = 0; win.Top = 0; win.Right = (short)(cols - 1); win.Bottom = (short)(rows - 1);
+      return SetConsoleWindowInfo(h, true, ref win);
+    } catch { return false; }
+    finally {
+      if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
+      FreeConsole();
+    }
   }
-  return '';
+}
+'@
+
+# Strumień otwieramy raz i trzymamy, bo AttachConsole potrafi podmienić to,
+# co [Console]::In zwróci później.
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput())
+$rootPid = 0
+$target = 0
+
+# Konsolę trzyma conhost, ale klientem jest dopiero cmd/powershell pod nim,
+# więc szukamy w dół drzewa procesów, aż któryś da się podłączyć.
+function Get-Candidates([int] $root) {
+  $found = New-Object System.Collections.Generic.List[int]
+  $found.Add($root)
+  $queue = New-Object System.Collections.Generic.Queue[int]
+  $queue.Enqueue($root)
+  $guard = 0
+  while ($queue.Count -gt 0 -and $guard -lt 32) {
+    $guard++
+    $parent = $queue.Dequeue()
+    try {
+      $children = Get-CimInstance Win32_Process -Filter "ParentProcessId=$parent" -ErrorAction SilentlyContinue
+    } catch { $children = $null }
+    foreach ($child in $children) {
+      $childPid = [int] $child.ProcessId
+      if (-not $found.Contains($childPid)) {
+        $found.Add($childPid)
+        $queue.Enqueue($childPid)
+      }
+    }
+  }
+  return $found
+}
+
+while ($null -ne ($line = $reader.ReadLine())) {
+  $line = $line.Trim()
+  if ($line -eq '') { continue }
+  if ($rootPid -eq 0) {
+    [void][int]::TryParse($line, [ref] $rootPid)
+    continue
+  }
+  if ($line -notmatch '^(\\d+)x(\\d+)$') { continue }
+  $cols = [int] $Matches[1]
+  $rows = [int] $Matches[2]
+  if ($cols -lt 20 -or $rows -lt 5 -or $cols -gt 1000 -or $rows -gt 1000) { continue }
+
+  $done = $false
+  if ($target -ne 0) {
+    $done = [ClResizer]::Resize([uint32] $target, [short] $cols, [short] $rows)
+  }
+  if (-not $done) {
+    foreach ($candidate in (Get-Candidates $rootPid)) {
+      if ([ClResizer]::Resize([uint32] $candidate, [short] $cols, [short] $rows)) {
+        $target = $candidate
+        $done = $true
+        break
+      }
+    }
+  }
+}
+`;
+
+// PowerShell dostaje skrypt jako -EncodedCommand, żeby stdin został wolny na
+// nasze komendy resize (przy -Command - skrypt zjadłby cały strumień wejściowy).
+function encodePowerShellCommand(script) {
+  return Buffer.from(script, 'utf16le').toString('base64');
 }
 
 // Kształt profilu 1:1 z tym, co plugin Terminal zapisuje w swoim data.json.
 // Po wyjściu z Claude'a zostajemy w shellu (exec zsh / -NoExit), żeby terminal nie znikał.
-function buildProfile(settings, pythonExecutable) {
+function buildProfile(settings, pythonExecutable, consoleSize) {
   const platform = currentPlatform();
   const command = fullCommand(settings);
   const base = {
     environment: [],
-    followTheme: true,
+    followTheme: false,
     name: PROFILE_NAME,
     platforms: { [platform]: true },
     pythonExecutable,
     restoreHistory: false,
     rightClickAction: 'copyPaste',
     successExitCodes: ['0', 'SIGINT', 'SIGTERM'],
-    terminalOptions: { documentOverride: null },
+    terminalOptions: TERMINAL_OPTIONS,
     type: 'integrated',
     useWin32Conhost: true,
   };
@@ -81,10 +223,17 @@ function buildProfile(settings, pythonExecutable) {
   // spawnuje ze `stdio: pipe`, więc bez conhosta proces nie ma TTY i Claude przechodzi
   // w tryb --print („Input must be provided either through stdin…").
   if (platform === 'win32') {
+    // `mode con` ustawia konsolę od środka, zanim Claude zdąży cokolwiek narysować.
+    // To punkt startowy oparty na zmierzonym panelu — dokładny rozmiar dołoży zaraz
+    // potem resizer, ale gdyby ten nie wstał, sesja i tak nie zaczyna się od 80 kolumn.
+    // Bez cudzysłowów świadomie: Terminal przepisuje argumenty do pliku .bat i escape'uje
+    // w nim każdy `"`, więc zagnieżdżone cudzysłowy potrafią dojść do PowerShella połamane.
+    const { cols, rows } = consoleSize || FALLBACK_CONSOLE_SIZE;
+    const prelude = `$null = & cmd.exe /c mode con: cols=${cols} lines=${rows}; `;
     return {
       ...base,
       executable: 'powershell.exe',
-      args: ['-NoExit', '-Command', command],
+      args: ['-NoExit', '-Command', `${prelude}${command}`],
       useWin32Conhost: true,
     };
   }
@@ -102,11 +251,166 @@ function buildProfile(settings, pythonExecutable) {
   };
 }
 
+// Mierzy, ile znaków naszej czcionki mieści się w prostokącie o zadanych pikselach.
+// Używane tylko do rozmiaru startowego konsoli — właściwy rozmiar bierzemy potem
+// wprost z xterma, który liczy to dokładniej.
+function measureCell() {
+  try {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.font = `${TERMINAL_OPTIONS.fontSize}px ${TERMINAL_OPTIONS.fontFamily}`;
+    const width = ctx.measureText('M'.repeat(50)).width / 50;
+    if (!isFinite(width) || width <= 0) return null;
+    return { width, height: TERMINAL_OPTIONS.fontSize * TERMINAL_OPTIONS.lineHeight };
+  } catch (error) {
+    return null;
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+// Terminal otwiera się w splicie obok tego, co już jest w workspace, więc na starcie
+// dostaje mniej więcej połowę szerokości. To zgadywanie, ale rozstrzyga tylko o tym,
+// jak wygląda pierwsza sekunda sesji.
+function estimateConsoleSize(app) {
+  const cell = measureCell();
+  const container = app && app.workspace ? app.workspace.containerEl : null;
+  if (!cell || !container || !container.clientWidth || !container.clientHeight) {
+    return { ...FALLBACK_CONSOLE_SIZE };
+  }
+  const { minCols, maxCols, minRows, maxRows } = CONSOLE_SIZE_LIMITS;
+  return {
+    cols: clamp(Math.floor((container.clientWidth * 0.5) / cell.width), minCols, maxCols),
+    rows: clamp(Math.floor((container.clientHeight * 0.85) / cell.height), minRows, maxRows),
+  };
+}
+
+// Trzyma konsolę Windows w tym samym rozmiarze co xterm. Jeden resizer na sesję;
+// gdy sesja się kończy albo widok znika, proces PowerShella idzie za nią.
+class ConsoleResizer {
+  constructor(emulator) {
+    this.emulator = emulator;
+    this.process = null;
+    this.disposed = false;
+    this.lastSent = '';
+    this.subscription = null;
+    this.timers = [];
+  }
+
+  async start() {
+    const { terminal } = this.emulator;
+    const shellPid = await this.resolveShellPid();
+    if (this.disposed || !shellPid) return false;
+
+    const { spawn } = require('child_process');
+    this.process = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(RESIZER_PS)],
+      { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true }
+    );
+
+    this.process.on('error', (error) => {
+      console.error('[claude-launcher] resizer konsoli nie wystartował', error);
+      this.dispose();
+    });
+    this.process.stderr.on('data', (chunk) => {
+      console.error('[claude-launcher] resizer:', chunk.toString());
+    });
+    this.process.once('exit', () => {
+      this.process = null;
+    });
+
+    if (!this.write(`${shellPid}`)) return false;
+
+    // Pierwsze dopasowanie od razu, kolejne przy każdej zmianie rozmiaru panelu.
+    // Terminal sam resize'uje xterm, więc wystarczy słuchać jego zdarzenia.
+    this.prime();
+    this.subscription = terminal.onResize(({ cols, rows }) => this.send(cols, rows));
+    return true;
+  }
+
+  // Konsola pod conhostem powstaje z opóźnieniem — PowerShell musi najpierw wstać.
+  // Gdyby pierwsza próba trafiła w pustkę, a użytkownik nigdy nie ruszył okna,
+  // sesja zostałaby na rozmiarze z `mode con`. Dlatego ponawiamy przez kilka sekund.
+  prime() {
+    const { terminal } = this.emulator;
+    this.send(terminal.cols, terminal.rows, true);
+    for (const delay of [400, 1200, 3000]) {
+      const timer = self.setTimeout(() => {
+        if (this.disposed) return;
+        const { terminal } = this.emulator;
+        this.send(terminal.cols, terminal.rows, true);
+      }, delay);
+      this.timers.push(timer);
+    }
+  }
+
+  async resolveShellPid() {
+    try {
+      const pty = await this.emulator.pseudoterminal;
+      const shell = pty ? await pty.shell : null;
+      return shell && shell.pid ? shell.pid : null;
+    } catch (error) {
+      console.error('[claude-launcher] nie udało się ustalić PID-u konsoli', error);
+      return null;
+    }
+  }
+
+  send(cols, rows, force) {
+    if (!cols || !rows) return;
+    const payload = `${cols}x${rows}`;
+    if (!force && payload === this.lastSent) return;
+    if (this.write(payload)) this.lastSent = payload;
+  }
+
+  write(line) {
+    if (this.disposed || !this.process || !this.process.stdin || this.process.stdin.destroyed) {
+      return false;
+    }
+    try {
+      this.process.stdin.write(`${line}\n`);
+      return true;
+    } catch (error) {
+      console.error('[claude-launcher] nie udało się wysłać rozmiaru do resizera', error);
+      return false;
+    }
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const timer of this.timers) self.clearTimeout(timer);
+    this.timers = [];
+    if (this.subscription && typeof this.subscription.dispose === 'function') {
+      try {
+        this.subscription.dispose();
+      } catch (error) {
+        console.warn('[claude-launcher]', error);
+      }
+    }
+    this.subscription = null;
+    if (this.process) {
+      try {
+        this.process.kill();
+      } catch (error) {
+        console.warn('[claude-launcher]', error);
+      }
+      this.process = null;
+    }
+  }
+}
+
 module.exports = class ClaudeLauncher extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    this.pythonExecutable = undefined;
-    this.warnedAboutPython = false;
+    this.resizers = new Set();
+    this.register(() => {
+      for (const resizer of this.resizers) resizer.dispose();
+      this.resizers.clear();
+    });
 
     addIcon('claude-mascot', MASCOT);
 
@@ -202,22 +506,11 @@ module.exports = class ClaudeLauncher extends Plugin {
   }
 
   // Na Unixach Terminal bez Pythona w ogóle nie postawi pseudoterminala, więc podajemy
-  // go na sztywno. Na Windowsie jest opcjonalny — wykrywamy raz na sesję, bo sprawdzenie
-  // kosztuje kilka uruchomień interpretera.
-  async resolvePython() {
-    if (currentPlatform() !== 'win32') return 'python3';
-    if (this.pythonExecutable === undefined) {
-      this.pythonExecutable = await detectWindowsPython();
-    }
-    if (!this.pythonExecutable && !this.warnedAboutPython) {
-      this.warnedAboutPython = true;
-      new Notice(
-        'Claude Code Launcher: terminal nie będzie dopasowywał się do szerokości panelu. ' +
-          'Żeby to naprawić, zainstaluj Pythona i wykonaj: pip install psutil pywinctl',
-        12000
-      );
-    }
-    return this.pythonExecutable;
+  // go na sztywno. Na Windowsie zostawiamy pole puste — skalowaniem konsoli zajmuje się
+  // nasz resizer w PowerShellu, a przy pustym polu Terminal spawnuje shell z ukrytym
+  // oknem, więc obok Obsidiana nie mruga czarne okno konsoli.
+  resolvePython() {
+    return currentPlatform() === 'win32' ? '' : 'python3';
   }
 
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
@@ -236,9 +529,60 @@ module.exports = class ClaudeLauncher extends Plugin {
       return;
     }
 
+    const before = this.collectEmulators();
     const previous = await this.installProfile(terminal, true);
     this.app.commands.executeCommandById(commandId);
     await this.restoreDefaultProfile(terminal, previous);
+    if (currentPlatform() === 'win32') this.attachResizer(before);
+  }
+
+  collectEmulators() {
+    const emulators = new Set();
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      if (view && view.emulator) emulators.add(view.emulator);
+    });
+    return emulators;
+  }
+
+  // Widok terminala powstaje asynchronicznie, więc czekamy na niego, zamiast zakładać,
+  // że jest gotowy zaraz po wykonaniu komendy.
+  async attachResizer(before) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      let fresh = null;
+      for (const emulator of this.collectEmulators()) {
+        if (!before.has(emulator) && emulator.terminal && emulator.pseudoterminal) {
+          fresh = emulator;
+          break;
+        }
+      }
+      if (fresh) {
+        const resizer = new ConsoleResizer(fresh);
+        this.resizers.add(resizer);
+        const forget = () => {
+          resizer.dispose();
+          this.resizers.delete(resizer);
+        };
+        try {
+          const started = await resizer.start();
+          if (!started) {
+            forget();
+            return;
+          }
+          fresh.pseudoterminal
+            .then(async (pty) => pty.onExit)
+            .catch(() => undefined)
+            .finally(forget);
+        } catch (error) {
+          console.error('[claude-launcher] resizer konsoli padł przy starcie', error);
+          forget();
+        }
+        return;
+      }
+      await new Promise((resolve) => self.setTimeout(resolve, 150));
+    }
+    console.warn('[claude-launcher] nie znalazłem widoku terminala — konsola bez resizera');
   }
 
   // Zapisuje profil w ustawieniach Terminala. Gdy makeDefault=true, zwraca poprzedni
@@ -251,7 +595,7 @@ module.exports = class ClaudeLauncher extends Plugin {
     }
 
     const previous = settings.value.defaultProfile;
-    const profile = buildProfile(this.settings, await this.resolvePython());
+    const profile = buildProfile(this.settings, this.resolvePython(), estimateConsoleSize(this.app));
 
     try {
       await settings.mutate((draft) => {
@@ -367,10 +711,6 @@ class ClaudeLauncherSettingTab extends PluginSettingTab {
             new Notice('Plugin Terminal nie jest włączony.', 8000);
             return;
           }
-          // Wymuszamy ponowne szukanie Pythona — ktoś mógł go doinstalować
-          // właśnie po to, żeby kliknąć ten przycisk.
-          this.plugin.pythonExecutable = undefined;
-          this.plugin.warnedAboutPython = false;
           await this.plugin.installProfile(terminal, false);
           new Notice('Profil „Claude Code" zapisany w pluginie Terminal.');
         })

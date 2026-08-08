@@ -11,7 +11,7 @@ Claude startuje od razu w katalogu Twojego vaulta, więc widzi wszystkie notatki
 - [Co dokładnie robi](#co-dokładnie-robi)
 - [Zanim zaczniesz](#zanim-zaczniesz)
 - [Instalacja](#instalacja)
-- [Windows: jeszcze jeden krok](#windows-jeszcze-jeden-krok)
+- [Windows: nic do zrobienia](#windows-nic-do-zrobienia)
 - [Pierwsze uruchomienie](#pierwsze-uruchomienie)
 - [Ustawienia](#ustawienia)
 - [Aktualizacje](#aktualizacje)
@@ -97,24 +97,13 @@ Przy tej metodzie aktualizacje wgrywasz ręcznie za każdym razem.
 
 ---
 
-## Windows: jeszcze jeden krok
+## Windows: nic do zrobienia
 
-Na Windowsie terminal w Obsidianie potrzebuje pomocniczego skryptu Pythona, który jest częścią pluginu Terminal. Ten skrypt chowa okno konsoli systemowej i dopasowuje szerokość terminala do panelu.
+Wcześniejsze wersje wymagały na Windowsie doinstalowania Pythona z bibliotekami `psutil` i `pywinctl` — bez nich tekst łamał się w przypadkowych miejscach, a ramki interfejsu Claude'a rozjeżdżały się na kawałki.
 
-Bez niego plugin zadziała, ale tekst będzie się łamał w przypadkowych miejscach, a ramki interfejsu Claude'a rozjadą się na kawałki.
+Od wersji 1.4.0 nie jest już potrzebny. Launcher skaluje konsolę własnym pomocnikiem w PowerShellu, który jest częścią każdej instalacji Windows.
 
-1. Zainstaluj Pythona z [python.org](https://www.python.org/downloads/windows/). Przy instalacji zaznacz **Add python.exe to PATH**
-2. Otwórz PowerShell i wykonaj:
-
-   ```
-   pip install psutil pywinctl
-   ```
-
-3. W Obsidianie: **Ustawienia** → **Claude Code Launcher** → kliknij **Utwórz / odśwież profil**
-
-Launcher sam sprawdzi, czy w systemie jest `py`, `python` albo `python3` z tymi bibliotekami. Jak nie znajdzie, powie o tym powiadomieniem i wystartuje bez dopasowywania szerokości.
-
-Na macOS i Linuksie nie musisz nic robić, Python jest tam częścią systemu.
+Jeśli masz Pythona zainstalowanego pod ten plugin, możesz go zostawić — nie przeszkadza, po prostu nie jest już używany.
 
 ---
 
@@ -175,9 +164,9 @@ Po aktualizacji warto raz kliknąć **Utwórz / odśwież profil**, bo część 
 | „Zainstaluj i włącz plugin Terminal" | Terminal nie jest włączony na liście dodatków. Wróć do kroku 1 instalacji |
 | „Plugin Terminal nie udostępnia komend" | W ustawieniach pluginu Terminal włącz opcję dodawania komend do palety |
 | Terminal się otwiera, ale pisze `command not found: claude` | Claude Code nie jest zainstalowany albo system go nie widzi. Sprawdź `which claude` lub `Get-Command claude` w zwykłym terminalu |
-| Windows: obok Obsidiana wyskakuje osobne czarne okno konsoli | Brakuje Pythona z bibliotekami. Zobacz sekcję [Windows: jeszcze jeden krok](#windows-jeszcze-jeden-krok) |
-| Windows: `Terminal resizer exited unexpectedly: 9009` | To samo. Windows nie ma polecenia `python3`, którego szukał Terminal |
-| Windows: tekst połamany, ramki rozjechane | To samo, brakuje `psutil` i `pywinctl` |
+| Windows: tekst połamany, ramki rozjechane, fragmenty w losowych miejscach | Naprawione w 1.4.0. Zaktualizuj plugin i kliknij **Utwórz / odśwież profil** |
+| Windows: obok Obsidiana wyskakuje osobne czarne okno konsoli | To samo — od 1.4.0 okno konsoli startuje ukryte |
+| Kolory terminala wyglądają inaczej niż na screenach | Od 1.4.0 terminal ma własną, stałą paletę zamiast kolorów motywu Obsidiana. Kliknij **Utwórz / odśwież profil** |
 | Windows: `Input must be provided either through stdin…` | Profil pochodzi ze starej wersji pluginu. Zaktualizuj i kliknij **Utwórz / odśwież profil** |
 | Ikonka nic nie robi | Otwórz konsolę deweloperską (`Cmd/Ctrl + Shift + I`) i poszukaj wpisów zaczynających się od `[claude-launcher]` |
 
@@ -191,12 +180,19 @@ Plugin Terminal umie otwierać sesje wyłącznie według profili zapisanych we w
 
 Profil jest nadpisywany przy każdym kliknięciu ikonki, dzięki czemu naprawia się sam po aktualizacji pluginu albo zmianie ustawień.
 
+Profil narzuca też wygląd terminala: własną paletę kolorów i czcionkę o stałej szerokości. To nie kosmetyka. Terminal domyślnie dziedziczy kolory i czcionkę z motywu Obsidiana, a jeśli motyw podsuwa czcionkę o zmiennej szerokości znaku, siatka terminala rozjeżdża się i tekst nachodzi na siebie.
+
 Na Windowsie dochodzą dwie rzeczy, które muszą chodzić w parze:
 
 - **conhost.exe** jest jedynym źródłem prawdziwej konsoli, bo Terminal spawnuje proces zawsze na strumieniach typu pipe. Bez conhosta Claude nie wykrywa terminala i przechodzi w tryb `--print`, w którym oczekuje jednorazowego pytania zamiast rozmowy.
-- **Skrypt Pythona** z pluginu Terminal chowa okno tej konsoli i skaluje ją do rozmiaru panelu. Kiedy go brakuje, Terminal startuje wprawdzie z ukrytym oknem, ale konsola zostaje na sztywnym rozmiarze i tekst przestaje się mieścić.
+- **Rozmiar tej konsoli** musi się zgadzać z rozmiarem xterma w panelu. Jeśli się rozjedzie, Claude rysuje interfejs dla jednej szerokości, a panel wyświetla go w innej — stąd połamane ramki i fragmenty tekstu w losowych miejscach.
 
-Dlatego Launcher przy zapisie profilu szuka interpretera Pythona z `psutil` i `pywinctl`, a znaleziony wpisuje do profilu.
+Drugą rzecz Launcher załatwia dwuetapowo, bez Pythona:
+
+1. Przy starcie sesji szacuje, ile znaków zmieści panel, i ustawia konsolę poleceniem `mode con` jeszcze zanim Claude cokolwiek narysuje.
+2. Zaraz potem podłącza własnego pomocnika w PowerShellu, który przez WinAPI (`AttachConsole`, `SetConsoleScreenBufferSize`, `SetConsoleWindowInfo`) trzyma konsolę w rozmiarze xterma i reaguje na każdą zmianę wielkości panelu.
+
+Pomocnik dostaje na wejściu PID konsoli, a potem kolejne rozmiary w formacie `KOLUMNYxWIERSZE`. Kończy się razem z sesją.
 
 ---
 
