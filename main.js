@@ -178,17 +178,25 @@ while ($null -ne ($line = $reader.ReadLine())) {
   $rows = [int] $Matches[2]
   if ($cols -lt 20 -or $rows -lt 5 -or $cols -gt 1000 -or $rows -gt 1000) { continue }
 
+  # [int16], nie [short] — akceleratora \`short\` nie ma w Windows PowerShellu 5.1,
+  # a to on stoi na większości maszyn. Przy \$ErrorActionPreference = 'Stop' brakujący
+  # typ ubijał całą pętlę już przy pierwszym dopasowaniu rozmiaru.
+  # Try/catch obok: żaden pojedynczy błąd WinAPI nie ma prawa zamknąć resizera na
+  # resztę sesji — użytkownik zostałby wtedy z konsolą w rozmiarze startowym.
   $done = $false
   if ($target -ne 0) {
-    $done = [ClResizer]::Resize([uint32] $target, [short] $cols, [short] $rows)
+    try { $done = [ClResizer]::Resize([uint32] $target, [int16] $cols, [int16] $rows) }
+    catch { [Console]::Error.WriteLine("resize failed: $_"); $done = $false }
   }
   if (-not $done) {
     foreach ($candidate in (Get-Candidates $rootPid)) {
-      if ([ClResizer]::Resize([uint32] $candidate, [short] $cols, [short] $rows)) {
-        $target = $candidate
-        $done = $true
-        break
-      }
+      try {
+        if ([ClResizer]::Resize([uint32] $candidate, [int16] $cols, [int16] $rows)) {
+          $target = $candidate
+          $done = $true
+          break
+        }
+      } catch { [Console]::Error.WriteLine("resize failed: $_") }
     }
   }
 }
