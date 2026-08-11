@@ -513,6 +513,17 @@ module.exports = class ClaudeLauncher extends Plugin {
     return currentPlatform() === 'win32' ? '' : 'python3';
   }
 
+  // Terminal do 3.23 rejestruje domyślny profil jako jedną komendę bez sufiksu katalogu
+  // (`open-terminal.default`), a dopiero nowsze wersje rozbijają go na `.root` i `.current`.
+  // Bez tego fallbacku launcher na starszym Terminalu twierdzi, że komend w ogóle nie ma.
+  resolveCommandId() {
+    const candidates = [
+      `terminal:open-terminal.default.${this.settings.cwd}`,
+      'terminal:open-terminal.default',
+    ];
+    return candidates.find((id) => this.app.commands.commands[id]);
+  }
+
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
   // a potem przywraca poprzedni. Terminal odczytuje profil synchronicznie przy
   // wykonaniu komendy, więc przywrócenie zaraz po niej jest bezpieczne.
@@ -523,9 +534,9 @@ module.exports = class ClaudeLauncher extends Plugin {
       return;
     }
 
-    const commandId = `terminal:open-terminal.default.${this.settings.cwd}`;
-    if (!this.app.commands.commands[commandId]) {
-      new Notice('Plugin Terminal nie udostępnia komend. Włącz w nim „Add to command palette".', 8000);
+    const commandId = this.resolveCommandId();
+    if (!commandId) {
+      new Notice('Plugin Terminal nie udostępnia komend. Włącz w nim „Add to command".', 8000);
       return;
     }
 
@@ -608,8 +619,25 @@ module.exports = class ClaudeLauncher extends Plugin {
       return undefined;
     }
 
+    this.warnAboutForeignResizer(settings);
     if (!makeDefault) await this.writeSettings(settings);
     return previous === PROFILE_ID ? undefined : previous;
+  }
+
+  // Terminal waliduje zapisywany profil i każde pole spoza typu `string` zastępuje swoim
+  // domyślnym — dla `pythonExecutable` jest nim `python3`. Dlatego na Windowsie podajemy
+  // pusty string, a nie pomijamy pole: pominięte wróciłoby jako `python3` i Terminal
+  // odpaliłby własny resizer, który bez pakietów `psutil` i `pywinctl` kończy się kodem 1
+  // („Terminal resizer exited unexpectedly") i zostawia konsolę bez skalowania.
+  warnAboutForeignResizer(settings) {
+    if (currentPlatform() !== 'win32') return;
+    const saved = settings.value.profiles[PROFILE_ID];
+    if (saved && saved.pythonExecutable) {
+      console.warn(
+        `[claude-launcher] Terminal nadpisał pythonExecutable na "${saved.pythonExecutable}" — ` +
+          'jego resizer wystartuje i bez pakietów psutil/pywinctl padnie z kodem 1',
+      );
+    }
   }
 
   async restoreDefaultProfile(terminal, previous) {
