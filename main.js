@@ -93,6 +93,12 @@ function fullCommand(settings) {
 // pierwsza linia na stdin to PID procesu konsoli, każda kolejna to `KOLUMNYxWIERSZE`.
 const RESIZER_PS = `
 $ErrorActionPreference = 'Stop'
+# Try na całym ciele skryptu: bez niego błąd terminujący (np. Add-Type na maszynie
+# bez kompilatora) ląduje w strumieniu błędów silnika PowerShella, a ten przy
+# przekierowanym stderr serializuje go do CLIXML — w logu launchera widać wtedy
+# tylko nagłówek "#< CLIXML" zamiast przyczyny. [Console]::Error pisze surowo,
+# z pominięciem serializacji.
+try {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -200,12 +206,41 @@ while ($null -ne ($line = $reader.ReadLine())) {
     }
   }
 }
+} catch {
+  [Console]::Error.WriteLine("resizer crashed: $_")
+  exit 1
+}
 `;
 
 // PowerShell dostaje skrypt jako -EncodedCommand, żeby stdin został wolny na
 // nasze komendy resize (przy -Command - skrypt zjadłby cały strumień wejściowy).
 function encodePowerShellCommand(script) {
   return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+// powershell.exe z przekierowanymi strumieniami potrafi mimo -OutputFormat Text
+// zserializować błędy silnika do CLIXML — w logu zostaje nagłówek "#< CLIXML"
+// i nieczytelny XML. Wyciągamy z niego czysty tekst błędu, żeby konsola devtools
+// pokazywała przyczynę awarii resizera, a nie opakowanie.
+function decodeResizerStderr(line) {
+  const trimmed = line.trim();
+  if (trimmed === '' || trimmed === '#< CLIXML') return '';
+  if (!trimmed.includes('CLIXML') && !trimmed.startsWith('<Objs ')) return trimmed;
+  const parts = [];
+  const re = /<S S="(?:Error|Warning)"[^>]*>([^<]*)<\/S>/g;
+  let match;
+  while ((match = re.exec(trimmed))) {
+    parts.push(
+      match[1]
+        .replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+    );
+  }
+  return parts.length ? parts.join('').trim() : trimmed;
 }
 
 // Kształt profilu 1:1 z tym, co plugin Terminal zapisuje w swoim data.json.
@@ -314,9 +349,12 @@ class ConsoleResizer {
     if (this.disposed || !shellPid) return false;
 
     const { spawn } = require('child_process');
+    // -InputFormat/-OutputFormat Text: przy przekierowanym stdin PowerShell domyślnie
+    // wchodzi w tryb XML i pisze błędy na stderr jako CLIXML — log traci treść.
+    // Stdin i tak czytamy surowym StreamReaderem, więc Text niczego nie psuje.
     this.process = spawn(
       'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(RESIZER_PS)],
+      ['-NoProfile', '-NonInteractive', '-InputFormat', 'Text', '-OutputFormat', 'Text', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(RESIZER_PS)],
       { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true }
     );
 
@@ -324,10 +362,24 @@ class ConsoleResizer {
       console.error('[claude-launcher] resizer konsoli nie wystartował', error);
       this.dispose();
     });
+    // Buforujemy do pełnych linii: CLIXML przychodzi jako nagłówek + osobna linia XML,
+    // a dekodowanie kawałka w pół dokumentu gubiłoby treść błędu.
+    let stderrBuffer = '';
+    const logStderr = (line) => {
+      const text = decodeResizerStderr(line);
+      if (text) console.error('[claude-launcher] resizer:', text);
+    };
     this.process.stderr.on('data', (chunk) => {
-      console.error('[claude-launcher] resizer:', chunk.toString());
+      stderrBuffer += chunk.toString();
+      let newline;
+      while ((newline = stderrBuffer.indexOf('\n')) !== -1) {
+        logStderr(stderrBuffer.slice(0, newline));
+        stderrBuffer = stderrBuffer.slice(newline + 1);
+      }
     });
     this.process.once('exit', () => {
+      logStderr(stderrBuffer);
+      stderrBuffer = '';
       this.process = null;
     });
 
