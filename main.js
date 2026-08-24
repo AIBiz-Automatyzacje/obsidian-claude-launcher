@@ -341,6 +341,7 @@ class ConsoleResizer {
     this.lastSent = '';
     this.subscription = null;
     this.timers = [];
+    this.dpiCleanup = null;
   }
 
   async start() {
@@ -389,7 +390,48 @@ class ConsoleResizer {
     // Terminal sam resize'uje xterm, więc wystarczy słuchać jego zdarzenia.
     this.prime();
     this.subscription = terminal.onResize(({ cols, rows }) => this.send(cols, rows));
+    this.watchDpi();
     return true;
+  }
+
+  // Terminal dopasowuje xterm wyłącznie z ResizeObservera na kontenerze panelu.
+  // Przeciągnięcie okna Obsidiana na monitor o innej skali zmienia devicePixelRatio,
+  // ale niekoniecznie rozmiar CSS kontenera — observer wtedy milczy i terminal
+  // zostaje w siatce policzonej dla poprzedniego ekranu. matchMedia na bieżącej
+  // rozdzielczości odpala się dokładnie przy takim przejściu; listener jest
+  // jednorazowy, więc po każdej zmianie uzbrajamy go od nowa dla nowego dpr.
+  watchDpi() {
+    const arm = () => {
+      if (this.disposed) return;
+      let media;
+      try {
+        media = self.matchMedia(`(resolution: ${self.devicePixelRatio}dppx)`);
+      } catch (error) {
+        return;
+      }
+      const onChange = () => {
+        media.removeEventListener('change', onChange);
+        this.dpiCleanup = null;
+        if (this.disposed) return;
+        this.refit();
+        arm();
+      };
+      media.addEventListener('change', onChange);
+      this.dpiCleanup = () => media.removeEventListener('change', onChange);
+    };
+    arm();
+  }
+
+  // Wymusza przeliczenie siatki xterma pod nowy monitor i od nowa dopasowuje
+  // konsolę. prime() wysyła rozmiar z flagą force i ponawia z opóźnieniem —
+  // dokładnie to, czego trzeba, gdy refit przyjdzie zanim panel się ustabilizuje.
+  refit() {
+    const { emulator } = this;
+    if (emulator && typeof emulator.resize === 'function') {
+      Promise.resolve(emulator.resize())
+        .catch((error) => console.warn('[claude-launcher] refit po zmianie monitora', error));
+    }
+    this.prime();
   }
 
   // Konsola pod conhostem powstaje z opóźnieniem — PowerShell musi najpierw wstać.
@@ -444,6 +486,14 @@ class ConsoleResizer {
     this.disposed = true;
     for (const timer of this.timers) self.clearTimeout(timer);
     this.timers = [];
+    if (this.dpiCleanup) {
+      try {
+        this.dpiCleanup();
+      } catch (error) {
+        console.warn('[claude-launcher]', error);
+      }
+      this.dpiCleanup = null;
+    }
     if (this.subscription && typeof this.subscription.dispose === 'function') {
       try {
         this.subscription.dispose();
