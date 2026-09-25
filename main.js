@@ -65,6 +65,13 @@ const TERMINAL_OPTIONS = {
 const FALLBACK_CONSOLE_SIZE = { cols: 120, rows: 30 };
 const CONSOLE_SIZE_LIMITS = { minCols: 60, maxCols: 240, minRows: 20, maxRows: 80 };
 
+// Ile ms spokoju po ostatniej zmianie rozmiaru panelu, zanim ruszymy konsolę.
+const RESIZE_SETTLE_MS = 120;
+
+// Co ile ms sprawdzamy, czy w workspace pojawił się terminal z naszym profilem bez
+// resizera — np. przywrócony po restarcie Obsidiana.
+const RESIZER_SCAN_MS = 1500;
+
 function currentPlatform() {
   const fromProcess = typeof process !== 'undefined' ? process.platform : null;
   if (fromProcess === 'darwin' || fromProcess === 'win32' || fromProcess === 'linux') {
@@ -105,34 +112,113 @@ using System.Runtime.InteropServices;
 public static class ClResizer {
   [StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
   [StructLayout(LayoutKind.Sequential)] public struct SMALL_RECT { public short Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct CSBI {
+    public COORD Size; public COORD Cursor; public ushort Attributes; public SMALL_RECT Window; public COORD MaxWindow;
+  }
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool FreeConsole();
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleScreenBufferSize(IntPtr h, COORD size);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleWindowInfo(IntPtr h, bool absolute, ref SMALL_RECT r);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleScreenBufferInfo(IntPtr h, out CSBI info);
+  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Auto)]
   static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool GetClientRect(IntPtr w, out RECT r);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowRect(IntPtr w, out RECT r);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr w, out uint pid);
 
+  // SWP_NOSIZE nie, SWP_NOMOVE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE — okno
+  // konsoli jest ukryte i ma takie zostać, zmieniamy mu wyłącznie rozmiar.
+  const uint SWP_FLAGS = 0x0002 | 0x0004 | 0x0008 | 0x0010;
+
+  public static string LastError = "";
+  public static uint LastHost = 0;
+
+  static bool SetBuffer(IntPtr h, int cols, int rows) {
+    COORD size; size.X = (short)cols; size.Y = (short)rows;
+    return SetConsoleScreenBufferSize(h, size);
+  }
+
+  static bool SetWindow(IntPtr h, int cols, int rows) {
+    SMALL_RECT r = new SMALL_RECT();
+    r.Left = 0; r.Top = 0; r.Right = (short)(cols - 1); r.Bottom = (short)(rows - 1);
+    return SetConsoleWindowInfo(h, true, ref r);
+  }
+
+  // Zwraca 0, gdy pod tym PID-em nie ma właściwej konsoli (szukaj dalej), 1, gdy konsola
+  // ma docelowy rozmiar, i 2, gdy to właściwa konsola, ale rozmiar nie wszedł (powód w LastError).
+  // host != 0 zawęża do konsoli, której okno należy do procesu conhosta z naszej sesji —
+  // pod Claude'em mogą chodzić procesy z własnymi, obcymi konsolami.
+  //
   // Std handles procesu wskazują na pipe'y od spawna, nie na konsolę, do której
   // się właśnie podłączyliśmy. Uchwyt konsoli bierzemy więc przez CONOUT$.
-  public static bool Resize(uint pid, short cols, short rows) {
+  public static int Resize(uint pid, int cols, int rows, uint host) {
     FreeConsole();
-    if (!AttachConsole(pid)) return false;
+    if (!AttachConsole(pid)) return 0;
     IntPtr h = IntPtr.Zero;
     try {
+      IntPtr hwnd = GetConsoleWindow();
+      uint owner = 0;
+      if (hwnd != IntPtr.Zero) GetWindowThreadProcessId(hwnd, out owner);
+      LastHost = owner;
+      if (host != 0 && owner != host) return 0;
       h = CreateFile("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
-      if (h == IntPtr.Zero || h == new IntPtr(-1)) return false;
-      // Bufor nie może być mniejszy od okna, więc najpierw ściągamy okno do
-      // minimum, potem ustawiamy bufor, a na końcu rozciągamy okno na docelowy rozmiar.
-      SMALL_RECT tiny = new SMALL_RECT();
-      tiny.Left = 0; tiny.Top = 0; tiny.Right = 0; tiny.Bottom = 0;
-      SetConsoleWindowInfo(h, true, ref tiny);
-      COORD size; size.X = cols; size.Y = rows;
-      if (!SetConsoleScreenBufferSize(h, size)) return false;
-      SMALL_RECT win = new SMALL_RECT();
-      win.Left = 0; win.Top = 0; win.Right = (short)(cols - 1); win.Bottom = (short)(rows - 1);
-      return SetConsoleWindowInfo(h, true, ref win);
-    } catch { return false; }
+      if (h == IntPtr.Zero || h == new IntPtr(-1)) return 0;
+
+      // Dwa przebiegi, jak w resizerze pluginu Terminal: przeliczenie pikseli okna
+      // jest przybliżone, drugi przebieg dociąga do dokładnego rozmiaru.
+      for (int pass = 0; pass < 2; pass++) {
+        CSBI info;
+        if (!GetConsoleScreenBufferInfo(h, out info)) {
+          LastError = "GetConsoleScreenBufferInfo, kod " + Marshal.GetLastWin32Error();
+          return 2;
+        }
+        int oldCols = info.Window.Right - info.Window.Left + 1;
+        int oldRows = info.Window.Bottom - info.Window.Top + 1;
+        if (oldCols == cols && oldRows == rows) return 1;
+
+        // Gdy Claude pracuje na alternatywnym buforze ekranu (tryb pełnoekranowy,
+        // claude agents), SetConsoleWindowInfo i SetConsoleScreenBufferSize odmawiają.
+        // Wtedy działa tylko to, co zrobiłby użytkownik: zmiana rozmiaru samego okna
+        // konsoli w pikselach. Okno jest ukryte, więc nikt tego nie zobaczy.
+        RECT client, frame;
+        if (hwnd != IntPtr.Zero && oldCols > 0 && oldRows > 0
+            && GetClientRect(hwnd, out client) && GetWindowRect(hwnd, out frame)) {
+          int clientW = client.Right - client.Left, clientH = client.Bottom - client.Top;
+          int frameW = frame.Right - frame.Left, frameH = frame.Bottom - frame.Top;
+          if (clientW > 0 && clientH > 0) {
+            int w = clientW * cols / oldCols + (frameW - clientW);
+            int hgt = clientH * rows / oldRows + (frameH - clientH);
+            SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, hgt, SWP_FLAGS);
+          }
+        }
+
+        // Bufor nie może być mniejszy od okna: przy zwężaniu najpierw okno, potem bufor,
+        // przy poszerzaniu odwrotnie. Osobno dla kolumn i dla wierszy.
+        if (oldCols < cols) { SetBuffer(h, cols, oldRows); SetWindow(h, cols, oldRows); }
+        else { SetWindow(h, cols, oldRows); SetBuffer(h, cols, oldRows); }
+        if (oldRows < rows) { SetBuffer(h, cols, rows); SetWindow(h, cols, rows); }
+        else { SetWindow(h, cols, rows); SetBuffer(h, cols, rows); }
+      }
+
+      CSBI after;
+      if (!GetConsoleScreenBufferInfo(h, out after)) {
+        LastError = "GetConsoleScreenBufferInfo, kod " + Marshal.GetLastWin32Error();
+        return 2;
+      }
+      int gotCols = after.Window.Right - after.Window.Left + 1;
+      int gotRows = after.Window.Bottom - after.Window.Top + 1;
+      if (gotCols == cols && gotRows == rows) return 1;
+      LastError = "konsola ma " + gotCols + "x" + gotRows + " zamiast " + cols + "x" + rows
+        + " (bufor " + after.Size.X + "x" + after.Size.Y + ", ostatni kod " + Marshal.GetLastWin32Error() + ")";
+      return 2;
+    } catch (Exception e) {
+      LastError = e.Message;
+      return 2;
+    }
     finally {
       if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
       FreeConsole();
@@ -146,6 +232,20 @@ public static class ClResizer {
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput())
 $rootPid = 0
 $target = 0
+$lastReport = ''
+
+# Ten sam błąd przy każdym resize zalałby konsolę devtools — zgłaszamy go raz,
+# dopóki się nie zmieni albo rozmiar znowu nie wejdzie.
+function Report([string] $message) {
+  if ($message -ne $script:lastReport) {
+    $script:lastReport = $message
+    [Console]::Error.WriteLine($message)
+  }
+}
+
+function Info([string] $message) {
+  [Console]::Error.WriteLine("info: $message")
+}
 
 # Konsolę trzyma conhost, ale klientem jest dopiero cmd/powershell pod nim,
 # więc szukamy w dół drzewa procesów, aż któryś da się podłączyć.
@@ -184,27 +284,41 @@ while ($null -ne ($line = $reader.ReadLine())) {
   $rows = [int] $Matches[2]
   if ($cols -lt 20 -or $rows -lt 5 -or $cols -gt 1000 -or $rows -gt 1000) { continue }
 
-  # [int16], nie [short] — akceleratora \`short\` nie ma w Windows PowerShellu 5.1,
-  # a to on stoi na większości maszyn. Przy \$ErrorActionPreference = 'Stop' brakujący
-  # typ ubijał całą pętlę już przy pierwszym dopasowaniu rozmiaru.
+  # Rozmiary lecą jako [int], nie [short] — akceleratora \`short\` nie ma w Windows
+  # PowerShellu 5.1, a to on stoi na większości maszyn.
   # Try/catch obok: żaden pojedynczy błąd WinAPI nie ma prawa zamknąć resizera na
   # resztę sesji — użytkownik zostałby wtedy z konsolą w rozmiarze startowym.
-  $done = $false
+  $status = 0
   if ($target -ne 0) {
-    try { $done = [ClResizer]::Resize([uint32] $target, [int16] $cols, [int16] $rows) }
-    catch { [Console]::Error.WriteLine("resize failed: $_"); $done = $false }
+    try { $status = [ClResizer]::Resize([uint32] $target, $cols, $rows, [uint32] 0) }
+    catch { Report "resize failed: $_"; $status = 0 }
   }
-  if (-not $done) {
-    foreach ($candidate in (Get-Candidates $rootPid)) {
-      try {
-        if ([ClResizer]::Resize([uint32] $candidate, [int16] $cols, [int16] $rows)) {
-          $target = $candidate
-          $done = $true
-          break
-        }
-      } catch { [Console]::Error.WriteLine("resize failed: $_") }
+  if ($status -eq 0) {
+    # Wyszukiwanie odpala zapytania WMI, więc jest wolne — robimy je tylko wtedy,
+    # gdy nie znamy jeszcze konsoli albo stara zniknęła, nigdy przy każdym resize.
+    $target = 0
+    $candidates = Get-Candidates $rootPid
+    # Najpierw ściśle: konsola, której okno należy do conhosta z naszej sesji.
+    # Luźny przebieg (dowolna konsola, ale tylko z potwierdzonym rozmiarem) zostaje
+    # na wypadek, gdyby okno konsoli należało u kogoś do innego procesu.
+    foreach ($hostPid in @([uint32] $rootPid, [uint32] 0)) {
+      foreach ($candidate in $candidates) {
+        try {
+          $status = [ClResizer]::Resize([uint32] $candidate, $cols, $rows, $hostPid)
+          if ($status -eq 1 -or ($status -eq 2 -and $hostPid -ne 0)) {
+            $target = $candidate
+            Info "konsola sesji: PID $candidate, okno konsoli należy do PID $([ClResizer]::LastHost)"
+            break
+          }
+          $status = 0
+        } catch { Report "resize failed: $_" }
+      }
+      if ($target -ne 0) { break }
     }
+    if ($target -eq 0) { Report "nie znalazłem konsoli sesji (procesy: $($candidates -join ', '))" }
   }
+  if ($status -eq 2) { Report "rozmiar nie wszedł: $([ClResizer]::LastError)" }
+  if ($status -eq 1) { $lastReport = '' }
 }
 } catch {
   [Console]::Error.WriteLine("resizer crashed: $_")
@@ -342,6 +456,7 @@ class ConsoleResizer {
     this.subscription = null;
     this.timers = [];
     this.dpiCleanup = null;
+    this.pendingTimer = null;
   }
 
   async start() {
@@ -368,7 +483,9 @@ class ConsoleResizer {
     let stderrBuffer = '';
     const logStderr = (line) => {
       const text = decodeResizerStderr(line);
-      if (text) console.error('[claude-launcher] resizer:', text);
+      if (!text) return;
+      if (text.startsWith('info: ')) console.log('[claude-launcher] resizer:', text.slice(6));
+      else console.error('[claude-launcher] resizer:', text);
     };
     this.process.stderr.on('data', (chunk) => {
       stderrBuffer += chunk.toString();
@@ -461,8 +578,27 @@ class ConsoleResizer {
     }
   }
 
+  // Przeciąganie panelu sypie rozmiarami kilka razy na sekundę. Każda zmiana rozmiaru
+  // konsoli to przełamanie jej tekstu i przerysowanie przez Claude'a, więc zwykłe
+  // zdarzenia zbieramy i wysyłamy tylko ostatni rozmiar, gdy ruch ustanie.
+  // force (prime, refit) idzie od razu.
   send(cols, rows, force) {
     if (!cols || !rows) return;
+    if (this.pendingTimer) {
+      self.clearTimeout(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+    if (force) {
+      this.flush(cols, rows, true);
+      return;
+    }
+    this.pendingTimer = self.setTimeout(() => {
+      this.pendingTimer = null;
+      if (!this.disposed) this.flush(cols, rows, false);
+    }, RESIZE_SETTLE_MS);
+  }
+
+  flush(cols, rows, force) {
     const payload = `${cols}x${rows}`;
     if (!force && payload === this.lastSent) return;
     if (this.write(payload)) this.lastSent = payload;
@@ -486,6 +622,8 @@ class ConsoleResizer {
     this.disposed = true;
     for (const timer of this.timers) self.clearTimeout(timer);
     this.timers = [];
+    if (this.pendingTimer) self.clearTimeout(this.pendingTimer);
+    this.pendingTimer = null;
     if (this.dpiCleanup) {
       try {
         this.dpiCleanup();
@@ -517,10 +655,23 @@ module.exports = class ClaudeLauncher extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     this.resizers = new Set();
+    // Emulatory, którymi już się zajęliśmy — także te, których sesja się skończyła.
+    // WeakSet, bo emulator znika razem z widokiem i nie chcemy go trzymać w pamięci.
+    this.handledEmulators = new WeakSet();
     this.register(() => {
       for (const resizer of this.resizers) resizer.dispose();
       this.resizers.clear();
     });
+
+    // Plugin Terminal stawia nową sesję przy każdym przywróceniu karty (restart
+    // Obsidiana, ponowne otwarcie workspace). Taka sesja startuje z naszego profilu,
+    // ale bez kliknięcia ikonki — resizer podpięty tylko w launch() by jej nie objął
+    // i konsola zostałaby w rozmiarze startowym. Dlatego pilnujemy wszystkich kart.
+    if (currentPlatform() === 'win32') {
+      this.app.workspace.onLayoutReady(() => this.syncResizers());
+      this.registerEvent(this.app.workspace.on('layout-change', () => this.syncResizers()));
+      this.registerInterval(self.setInterval(() => this.syncResizers(), RESIZER_SCAN_MS));
+    }
 
     addIcon('claude-mascot', MASCOT);
 
@@ -654,7 +805,20 @@ module.exports = class ClaudeLauncher extends Plugin {
     const previous = await this.installProfile(terminal, true);
     this.app.commands.executeCommandById(commandId);
     await this.restoreDefaultProfile(terminal, previous);
-    if (currentPlatform() === 'win32') this.attachResizer(before);
+    if (currentPlatform() === 'win32') this.waitForNewTerminal(before);
+  }
+
+  // Widok terminala powstaje asynchronicznie. Skan co RESIZER_SCAN_MS i tak go złapie,
+  // ale po kliknięciu ikonki chcemy dopasować konsolę od razu, więc przez chwilę
+  // skanujemy gęściej. Karta, która pojawiła się po kliknięciu, jest nasza z definicji,
+  // więc przyjmujemy ją nawet wtedy, gdy nie da się odczytać jej profilu.
+  async waitForNewTerminal(before) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      if (this.syncResizers(before) > 0) return;
+      await new Promise((resolve) => self.setTimeout(resolve, 150));
+    }
+    console.warn('[claude-launcher] nie znalazłem widoku terminala — konsola bez resizera');
   }
 
   collectEmulators() {
@@ -666,44 +830,73 @@ module.exports = class ClaudeLauncher extends Plugin {
     return emulators;
   }
 
-  // Widok terminala powstaje asynchronicznie, więc czekamy na niego, zamiast zakładać,
-  // że jest gotowy zaraz po wykonaniu komendy.
-  async attachResizer(before) {
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      let fresh = null;
-      for (const emulator of this.collectEmulators()) {
-        if (!before.has(emulator) && emulator.terminal && emulator.pseudoterminal) {
-          fresh = emulator;
-          break;
+  // Stan widoku Terminala: najpierw pole `state`, a gdy go nie ma (inna wersja
+  // Terminala), szukamy obiektu z profilem w tym, co zwraca getState().
+  terminalState(view) {
+    if (view.state && view.state.profile) return view.state;
+    try {
+      const raw = typeof view.getState === 'function' ? view.getState() : null;
+      if (raw && typeof raw === 'object') {
+        for (const value of Object.values(raw)) {
+          if (value && typeof value === 'object' && value.profile) return value;
         }
       }
-      if (fresh) {
-        const resizer = new ConsoleResizer(fresh);
-        this.resizers.add(resizer);
-        const forget = () => {
-          resizer.dispose();
-          this.resizers.delete(resizer);
-        };
-        try {
-          const started = await resizer.start();
-          if (!started) {
-            forget();
-            return;
-          }
-          fresh.pseudoterminal
-            .then(async (pty) => pty.onExit)
-            .catch(() => undefined)
-            .finally(forget);
-        } catch (error) {
-          console.error('[claude-launcher] resizer konsoli padł przy starcie', error);
-          forget();
-        }
+    } catch (error) {
+      return null;
+    }
+    return null;
+  }
+
+  // Nasz resizer jest potrzebny tylko tam, gdzie nikt inny nie skaluje konsoli:
+  // profil launchera, conhost włączony, a resizer Pythona z Terminala wyłączony.
+  isLauncherTerminal(view) {
+    const state = this.terminalState(view);
+    const profile = state ? state.profile : null;
+    if (!profile || profile.type !== 'integrated') return false;
+    const ours = state.profileSourceId === PROFILE_ID || profile.name === PROFILE_NAME;
+    return ours && profile.useWin32Conhost === true && !profile.pythonExecutable;
+  }
+
+  // Podpina resizer do każdej karty launchera, która go jeszcze nie ma. Zwraca,
+  // ile nowych podpiął. Emulator trafia do handledEmulators od razu, synchronicznie,
+  // więc równoległe wywołania nie podepną drugiego resizera do tej samej sesji.
+  syncResizers(before) {
+    let attached = 0;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      const emulator = view ? view.emulator : null;
+      if (!emulator || !emulator.terminal || !emulator.pseudoterminal) return;
+      if (this.handledEmulators.has(emulator)) return;
+      const launchedNow = before ? !before.has(emulator) : false;
+      if (!launchedNow && !this.isLauncherTerminal(view)) return;
+      this.handledEmulators.add(emulator);
+      this.attachResizer(emulator);
+      attached++;
+    });
+    return attached;
+  }
+
+  async attachResizer(emulator) {
+    const resizer = new ConsoleResizer(emulator);
+    this.resizers.add(resizer);
+    const forget = () => {
+      resizer.dispose();
+      this.resizers.delete(resizer);
+    };
+    try {
+      const started = await resizer.start();
+      if (!started) {
+        forget();
         return;
       }
-      await new Promise((resolve) => self.setTimeout(resolve, 150));
+      emulator.pseudoterminal
+        .then(async (pty) => pty.onExit)
+        .catch(() => undefined)
+        .finally(forget);
+    } catch (error) {
+      console.error('[claude-launcher] resizer konsoli padł przy starcie', error);
+      forget();
     }
-    console.warn('[claude-launcher] nie znalazłem widoku terminala — konsola bez resizera');
   }
 
   // Zapisuje profil w ustawieniach Terminala. Gdy makeDefault=true, zwraca poprzedni
