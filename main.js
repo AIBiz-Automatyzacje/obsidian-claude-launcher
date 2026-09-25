@@ -715,16 +715,26 @@ module.exports = class ClaudeLauncher extends Plugin {
     return found;
   }
 
+  // Rozpoznajemy klawisz po trzech polach naraz, nie po samym `code`. Narzędzia do
+  // dyktowania wklejają tekst symulowanym Ctrl+V (SendInput) z samym kodem wirtualnym,
+  // bez kodu skanowania — Chromium daje wtedy pusty `code`, a `key` i `keyCode` są
+  // poprawne. Na samym `code` takie wklejenie przelatywało do xterma jako znak 0x16.
+  // Ctrl+Shift+V i Shift+Insert to wklejanie w innych terminalach, część narzędzi ich używa.
   handleClipboardKey(event) {
-    if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    if (event.altKey || event.metaKey) return;
 
-    const key = event.code === 'KeyV' || event.code === 'KeyC' ? event.code : null;
-    if (!key) return;
+    const is = (code, char, keyCode) =>
+      event.code === code || (event.key && event.key.toLowerCase() === char) || event.keyCode === keyCode;
+    const paste =
+      (event.ctrlKey && is('KeyV', 'v', 86)) ||
+      (event.shiftKey && !event.ctrlKey && is('Insert', 'insert', 45));
+    const copy = event.ctrlKey && !event.shiftKey && is('KeyC', 'c', 67);
+    if (!paste && !copy) return;
 
     const terminal = this.terminalFromEvent(event);
     if (!terminal) return;
 
-    if (key === 'KeyV') {
+    if (paste) {
       event.preventDefault();
       event.stopPropagation();
       this.pasteInto(terminal);
@@ -739,9 +749,24 @@ module.exports = class ClaudeLauncher extends Plugin {
     this.copyFrom(terminal);
   }
 
+  // Schowek czytamy synchronicznie, jeszcze w obsłudze klawisza. Narzędzia do dyktowania
+  // podkładają tekst do schowka, wysyłają Ctrl+V i zaraz przywracają poprzednią
+  // zawartość — asynchroniczne navigator.clipboard potrafi zdążyć dopiero po przywróceniu
+  // i wkleić stary schowek. Edytor tekstu czyta schowek od razu, dlatego tam działało.
+  readClipboardNow() {
+    try {
+      const { clipboard } = require('electron');
+      if (clipboard && typeof clipboard.readText === 'function') return clipboard.readText();
+    } catch (error) {
+      return null;
+    }
+    return null;
+  }
+
   async pasteInto(terminal) {
     try {
-      const text = await navigator.clipboard.readText();
+      const now = this.readClipboardNow();
+      const text = now !== null ? now : await navigator.clipboard.readText();
       if (text) terminal.paste(text);
     } catch (error) {
       console.error('[claude-launcher] nie udało się wkleić ze schowka', error);
