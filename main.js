@@ -72,6 +72,17 @@ const RESIZE_SETTLE_MS = 120;
 // resizera — np. przywrócony po restarcie Obsidiana.
 const RESIZER_SCAN_MS = 1500;
 
+const LINK_HANDLER = {
+  activate(event, uri) {
+    if (!/^https?:\/\//i.test(uri)) return;
+    try {
+      require('electron').shell.openExternal(uri);
+    } catch (error) {
+      console.error('[claude-launcher] nie udało się otworzyć linku', uri, error);
+    }
+  },
+};
+
 function currentPlatform() {
   const fromProcess = typeof process !== 'undefined' ? process.platform : null;
   if (fromProcess === 'darwin' || fromProcess === 'win32' || fromProcess === 'linux') {
@@ -673,6 +684,15 @@ module.exports = class ClaudeLauncher extends Plugin {
       this.registerInterval(self.setInterval(() => this.syncResizers(), RESIZER_SCAN_MS));
     }
 
+    // Claude Code z FORCE_HYPERLINK=1 wysyła adresy WWW jako linki OSC 8. Terminal nie podaje
+    // xtermowi własnej obsługi takich linków, więc xterm pokazuje okienko „Do you want to
+    // navigate…”, a jego window.open() Obsidian blokuje — klik nic nie robi. Podpinamy obsługę,
+    // która otwiera http(s) w domyślnej przeglądarce. Innych protokołów nie bierzemy: linki
+    // file:// do notatek ma przechodzić dalej do Claude Code, który otwiera je w Obsidianie.
+    this.app.workspace.onLayoutReady(() => this.syncLinkHandlers());
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.syncLinkHandlers()));
+    this.registerInterval(self.setInterval(() => this.syncLinkHandlers(), RESIZER_SCAN_MS));
+
     addIcon('claude-mascot', MASCOT);
 
     this.addRibbonIcon('claude-mascot', 'Claude Code — nowa sesja', () => {
@@ -853,6 +873,19 @@ module.exports = class ClaudeLauncher extends Plugin {
       if (view && view.emulator) emulators.add(view.emulator);
     });
     return emulators;
+  }
+
+  syncLinkHandlers() {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      const terminal = view && view.emulator ? view.emulator.terminal : null;
+      if (!terminal || !terminal.options || terminal.options.linkHandler === LINK_HANDLER) return;
+      try {
+        terminal.options.linkHandler = LINK_HANDLER;
+      } catch (error) {
+        console.error('[claude-launcher] nie udało się podpiąć obsługi linków', error);
+      }
+    });
   }
 
   // Stan widoku Terminala: najpierw pole `state`, a gdy go nie ma (inna wersja
