@@ -68,6 +68,15 @@ const CONSOLE_SIZE_LIMITS = { minCols: 60, maxCols: 240, minRows: 20, maxRows: 8
 // Ile ms spokoju po ostatniej zmianie rozmiaru panelu, zanim ruszymy konsolę.
 const RESIZE_SETTLE_MS = 120;
 
+// Po starcie sesji czekamy, aż Claude skończy rysować (tyle ms ciszy w wyjściu),
+// i wtedy poruszamy konsolą o jedną kolumnę. Pilnujemy tylko początku sesji
+// i najwyżej kilka razy — potem rozmiar trzyma już zwykły resize panelu.
+const STARTUP_QUIET_MS = 800;
+const STARTUP_WATCH_MS = 20000;
+const STARTUP_MAX_NUDGES = 2;
+// Ile ms konsola stoi o kolumnę węższa, zanim wróci do rozmiaru xterma.
+const NUDGE_RESTORE_MS = 250;
+
 // Co ile ms sprawdzamy, czy w workspace pojawił się terminal z naszym profilem bez
 // resizera — np. przywrócony po restarcie Obsidiana.
 const RESIZER_SCAN_MS = 1500;
@@ -468,6 +477,7 @@ class ConsoleResizer {
     this.timers = [];
     this.dpiCleanup = null;
     this.pendingTimer = null;
+    this.startupCleanup = null;
   }
 
   async start() {
@@ -519,7 +529,88 @@ class ConsoleResizer {
     this.prime();
     this.subscription = terminal.onResize(({ cols, rows }) => this.send(cols, rows));
     this.watchDpi();
+    this.watchStartupRedraw();
     return true;
+  }
+
+  // Zgłoszenie z Windowsa: resizer znajduje konsolę i ustawia rozmiar zgodny z xtermem
+  // (log „konsola sesji: PID …”), a mimo to sesja startuje z rozjechanymi ramkami
+  // i zjadanymi spacjami przy pisaniu. Prostuje ją dopiero minimalne przeciągnięcie
+  // krawędzi panelu, czyli zmiana rozmiaru już PO tym, jak Claude się narysował.
+  // Robimy to samo automatycznie: gdy wyjście sesji ucichnie, poruszamy konsolą
+  // o jedną kolumnę i wracamy, a Claude przerysowuje się pod właściwy rozmiar.
+  // Pierwsze wpisanie znaku przez użytkownika kończy pilnowanie — nie chcemy
+  // przerysowania w trakcie pisania.
+  watchStartupRedraw() {
+    const { terminal } = this.emulator;
+    if (!terminal || typeof terminal.onWriteParsed !== 'function') return;
+    const startedAt = Date.now();
+    let nudges = 0;
+    let quietTimer = null;
+    let ignoreUntil = 0;
+    let writeSub = null;
+    let dataSub = null;
+    const stop = () => {
+      if (quietTimer) self.clearTimeout(quietTimer);
+      quietTimer = null;
+      for (const sub of [writeSub, dataSub]) {
+        if (sub && typeof sub.dispose === 'function') {
+          try {
+            sub.dispose();
+          } catch (error) {
+            console.warn('[claude-launcher]', error);
+          }
+        }
+      }
+      writeSub = null;
+      dataSub = null;
+      this.startupCleanup = null;
+    };
+    this.startupCleanup = stop;
+
+    writeSub = terminal.onWriteParsed(() => {
+      if (this.disposed) return;
+      const now = Date.now();
+      if (now - startedAt > STARTUP_WATCH_MS) {
+        stop();
+        return;
+      }
+      // Przerysowanie po naszym własnym poruszeniu nie jest nowym rysowaniem Claude'a.
+      if (now < ignoreUntil) return;
+      if (quietTimer) self.clearTimeout(quietTimer);
+      quietTimer = self.setTimeout(() => {
+        quietTimer = null;
+        if (this.disposed) return;
+        nudges += 1;
+        ignoreUntil = Date.now() + NUDGE_RESTORE_MS + STARTUP_QUIET_MS * 2;
+        this.nudge();
+        if (nudges >= STARTUP_MAX_NUDGES) stop();
+      }, STARTUP_QUIET_MS);
+    });
+    if (typeof terminal.onData === 'function') dataSub = terminal.onData(() => stop());
+  }
+
+  // Najpierw dopasowujemy xterm do panelu (jak przy przeciągnięciu krawędzi),
+  // potem konsola na chwilę o kolumnę węższa i z powrotem do rozmiaru xterma.
+  nudge() {
+    const { emulator } = this;
+    const fit = emulator && typeof emulator.resize === 'function'
+      ? Promise.resolve(emulator.resize()).catch((error) => console.warn('[claude-launcher] refit przed poruszeniem konsoli', error))
+      : Promise.resolve();
+    fit.then(() => {
+      if (this.disposed) return;
+      const { terminal } = this.emulator;
+      const { cols, rows } = terminal;
+      if (!cols || !rows || cols <= 20) return;
+      console.log(`[claude-launcher] poruszam konsolą po starcie sesji (${cols}x${rows})`);
+      this.send(cols - 1, rows, true);
+      const timer = self.setTimeout(() => {
+        if (this.disposed) return;
+        const { terminal } = this.emulator;
+        this.send(terminal.cols, terminal.rows, true);
+      }, NUDGE_RESTORE_MS);
+      this.timers.push(timer);
+    });
   }
 
   // Terminal dopasowuje xterm wyłącznie z ResizeObservera na kontenerze panelu.
@@ -631,6 +722,7 @@ class ConsoleResizer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.startupCleanup) this.startupCleanup();
     for (const timer of this.timers) self.clearTimeout(timer);
     this.timers = [];
     if (this.pendingTimer) self.clearTimeout(this.pendingTimer);
