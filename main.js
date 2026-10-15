@@ -539,18 +539,25 @@ class ConsoleResizer {
   // krawędzi panelu, czyli zmiana rozmiaru już PO tym, jak Claude się narysował.
   // Robimy to samo automatycznie: gdy wyjście sesji ucichnie, poruszamy konsolą
   // o jedną kolumnę i wracamy, a Claude przerysowuje się pod właściwy rozmiar.
-  // Pierwsze wpisanie znaku przez użytkownika kończy pilnowanie — nie chcemy
-  // przerysowania w trakcie pisania.
+  // Pierwszy klawisz wciśnięty przez użytkownika kończy pilnowanie — nie chcemy
+  // przerysowania w trakcie pisania. Celowo onKey, nie onData: onData odpala też
+  // przy automatycznych odpowiedziach xterma na zapytania konsoli (pozycja kursora,
+  // atrybuty terminala), które conhost i Claude wysyłają zaraz po starcie — w 1.4.7
+  // to one wyłączały pilnowanie, zanim doszło do pierwszego poruszenia.
   watchStartupRedraw() {
     const { terminal } = this.emulator;
-    if (!terminal || typeof terminal.onWriteParsed !== 'function') return;
+    if (!terminal || typeof terminal.onWriteParsed !== 'function') {
+      console.log('[claude-launcher] terminal bez onWriteParsed — pomijam przerysowanie po starcie');
+      return;
+    }
     const startedAt = Date.now();
     let nudges = 0;
     let quietTimer = null;
     let ignoreUntil = 0;
     let writeSub = null;
     let dataSub = null;
-    const stop = () => {
+    const stop = (reason) => {
+      if (reason) console.log(`[claude-launcher] koniec pilnowania startu sesji: ${reason}`);
       if (quietTimer) self.clearTimeout(quietTimer);
       quietTimer = null;
       for (const sub of [writeSub, dataSub]) {
@@ -572,7 +579,7 @@ class ConsoleResizer {
       if (this.disposed) return;
       const now = Date.now();
       if (now - startedAt > STARTUP_WATCH_MS) {
-        stop();
+        stop(nudges ? '' : 'minął czas, bez poruszenia');
         return;
       }
       // Przerysowanie po naszym własnym poruszeniu nie jest nowym rysowaniem Claude'a.
@@ -584,10 +591,12 @@ class ConsoleResizer {
         nudges += 1;
         ignoreUntil = Date.now() + NUDGE_RESTORE_MS + STARTUP_QUIET_MS * 2;
         this.nudge();
-        if (nudges >= STARTUP_MAX_NUDGES) stop();
+        if (nudges >= STARTUP_MAX_NUDGES) stop('');
       }, STARTUP_QUIET_MS);
     });
-    if (typeof terminal.onData === 'function') dataSub = terminal.onData(() => stop());
+    if (typeof terminal.onKey === 'function') {
+      dataSub = terminal.onKey(() => stop(nudges ? '' : 'użytkownik zaczął pisać przed poruszeniem'));
+    }
   }
 
   // Najpierw dopasowujemy xterm do panelu (jak przy przeciągnięciu krawędzi),
