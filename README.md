@@ -48,6 +48,8 @@ Potrzebujesz trzech rzeczy:
 - macOS i Linux: `which claude`
 - Windows (PowerShell): `Get-Command claude`
 
+Sprawdzaj w **nowym** oknie terminala, nie w tym, w którym instalowałeś. Nowe okno widzi tylko to, co zostało zapisane na stałe, czyli dokładnie to samo, co zobaczy terminal w Obsidianie.
+
 Jeśli komenda nic nie zwraca, najpierw zainstaluj Claude Code według [oficjalnej instrukcji](https://docs.claude.com/en/docs/claude-code/setup).
 
 ---
@@ -163,7 +165,7 @@ Po aktualizacji warto raz kliknąć **Utwórz / odśwież profil**, bo część 
 |---|---|
 | „Zainstaluj i włącz plugin Terminal" | Terminal nie jest włączony na liście dodatków. Wróć do kroku 1 instalacji |
 | „Plugin Terminal nie udostępnia komend" | W ustawieniach pluginu Terminal włącz opcję dodawania komend do palety |
-| Terminal się otwiera, ale pisze `command not found: claude` | Claude Code nie jest zainstalowany albo system go nie widzi. Sprawdź `which claude` lub `Get-Command claude` w zwykłym terminalu |
+| Terminal się otwiera, ale pisze `command not found: claude` | Zamknij zwykły Terminal, otwórz **nowe** okno i wpisz `claude --version`. Jeśli i tam nie działa, ścieżka do Claude'a nie jest zapisana na stałe (częste po instalacji natywnej, gdy `export PATH=…` wpisano tylko w jednym oknie). Na Macu wklej `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`, zamknij zakładkę z sesją i kliknij ikonkę jeszcze raz. Jeśli `ls ~/.local/bin/claude` nic nie znajduje, Claude Code nie jest zainstalowany |
 | Windows: tekst połamany, ramki rozjechane, fragmenty w losowych miejscach | Naprawione w 1.4.0. Zaktualizuj plugin i kliknij **Utwórz / odśwież profil** |
 | Windows: obok Obsidiana wyskakuje osobne czarne okno konsoli | To samo — od 1.4.0 okno konsoli startuje ukryte |
 | Kolory terminala wyglądają inaczej niż na screenach | Od 1.4.0 terminal ma własną, stałą paletę zamiast kolorów motywu Obsidiana. Kliknij **Utwórz / odśwież profil** |

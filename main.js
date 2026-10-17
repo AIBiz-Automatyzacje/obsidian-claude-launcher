@@ -813,9 +813,9 @@ module.exports = class ClaudeLauncher extends Plugin {
     this.addSettingTab(new ClaudeLauncherSettingTab(this.app, this));
 
     // obsidian://claude-launcher?attach=<id> otwiera sesję w tle (claude attach) w karcie
-    // terminala. Korzysta z tego np. zewnętrzny panel sesji. Druga prośba o tę samą sesję
-    // przełącza na już otwartą kartę zamiast stawiać kolejną.
-    this.attachedLeaves = new Map();
+    // terminala. Korzysta z tego np. zewnętrzny panel sesji. Kolejne prośby podmieniają
+    // sesję w tej samej karcie (patrz attach).
+    this.mainLeaf = null;
     this.registerObsidianProtocolHandler('claude-launcher', (params) => {
       const id = String(params.attach || '');
       if (/^[a-z0-9-]{4,64}$/i.test(id)) this.attach(id);
@@ -945,23 +945,30 @@ module.exports = class ClaudeLauncher extends Plugin {
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
   // a potem przywraca poprzedni. Terminal odczytuje profil synchronicznie przy
   // wykonaniu komendy, więc przywrócenie zaraz po niej jest bezpieczne.
+  // Jedna karta „główna”: pierwsza otwarta linkiem attach. Kolejne linki podmieniają w niej
+  // sesję zamiast stawiać nowe karty: Ctrl+Z wychodzi z `claude attach` do shella (sesja
+  // w tle pracuje dalej), potem wpisujemy `claude attach <id>`. Profil kończy się na
+  // `exec zsh`, więc po wyjściu z attach w karcie zawsze czeka shell.
   async attach(id) {
-    const open = this.attachedLeaves.get(id);
-    if (open && open.view && open.view.emulator && open.view.containerEl.isConnected) {
-      this.app.workspace.revealLeaf(open);
-      this.app.workspace.setActiveLeaf(open, { focus: true });
+    const main = this.mainLeaf;
+    const term = main && main.view && main.view.emulator && main.view.containerEl.isConnected ? main.view.emulator.terminal : null;
+    if (term && typeof term.input === 'function') {
+      this.app.workspace.revealLeaf(main);
+      this.app.workspace.setActiveLeaf(main, { focus: true });
+      term.input('\x1a', true);
+      await new Promise((resolve) => self.setTimeout(resolve, 1200));
+      term.input(`${(this.settings.command.trim() || 'claude')} attach ${id}\r`, true);
       return;
     }
     const before = this.collectEmulators();
     await this.launch(id);
-    // karta z nowym emulatorem = nasza sesja; zapamiętujemy ją do ponownego przełączenia
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       let leaf = null;
       this.app.workspace.iterateAllLeaves((l) => {
         if (!leaf && l.view && l.view.emulator && !before.has(l.view.emulator)) leaf = l;
       });
-      if (leaf) return void this.attachedLeaves.set(id, leaf);
+      if (leaf) { this.mainLeaf = leaf; return; }
       await new Promise((resolve) => self.setTimeout(resolve, 150));
     }
   }
