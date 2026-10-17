@@ -816,6 +816,10 @@ module.exports = class ClaudeLauncher extends Plugin {
     // terminala. Korzysta z tego np. zewnętrzny panel sesji. Kolejne prośby podmieniają
     // sesję w tej samej karcie (patrz attach).
     this.mainLeaf = null;
+    // Główna karta = ostatnia aktywna karta terminala (ta, w której pracujesz).
+    this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => {
+      if (leaf && leaf.view && leaf.view.emulator) this.mainLeaf = leaf;
+    }));
     this.registerObsidianProtocolHandler('claude-launcher', (params) => {
       const id = String(params.attach || '');
       if (/^[a-z0-9-]{4,64}$/i.test(id)) this.attach(id);
@@ -945,7 +949,7 @@ module.exports = class ClaudeLauncher extends Plugin {
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
   // a potem przywraca poprzedni. Terminal odczytuje profil synchronicznie przy
   // wykonaniu komendy, więc przywrócenie zaraz po niej jest bezpieczne.
-  // Jedna karta „główna”: pierwsza otwarta linkiem attach. Kolejne linki podmieniają w niej
+  // Jedna karta „główna”: ostatnio aktywna karta terminala (albo nowa, gdy żadnej nie ma). Kolejne linki podmieniają w niej
   // sesję zamiast stawiać nowe karty: Ctrl+Z wychodzi z `claude attach` do shella (sesja
   // w tle pracuje dalej), potem wpisujemy `claude attach <id>`. Profil kończy się na
   // `exec zsh`, więc po wyjściu z attach w karcie zawsze czeka shell.
@@ -957,7 +961,11 @@ module.exports = class ClaudeLauncher extends Plugin {
       this.app.workspace.setActiveLeaf(main, { focus: true });
       term.input('\x1a', true);
       await new Promise((resolve) => self.setTimeout(resolve, 1200));
-      term.input(`${(this.settings.command.trim() || 'claude')} attach ${id}\r`, true);
+      // `claude attach` po Ctrl+Z kończy się sam, ale `claude agents` zostaje zawieszony —
+      // taki podgląd zamykamy (sesje w tle chodzą w demonie, nic nie tracą). Spacja na
+      // początku: linia nie trafia do historii shella.
+      const claude = this.settings.command.trim() || 'claude';
+      term.input(` [[ "$(jobs %+ 2>/dev/null)" == *"${claude} a"* ]] && kill -9 %+ 2>/dev/null; clear; ${claude} attach ${id}\r`, true);
       return;
     }
     const before = this.collectEmulators();
