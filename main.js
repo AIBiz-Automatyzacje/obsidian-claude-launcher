@@ -104,6 +104,8 @@ function currentPlatform() {
 }
 
 function fullCommand(settings) {
+  // Podłączenie do istniejącej sesji w tle (link obsidian://claude-launcher?attach=<id>)
+  if (settings.attach) return `${settings.command.trim() || 'claude'} attach ${settings.attach}`;
   const flags = settings.skipPermissions ? ' --dangerously-skip-permissions' : '';
   return `${settings.command.trim() || 'claude'}${flags}`;
 }
@@ -810,6 +812,15 @@ module.exports = class ClaudeLauncher extends Plugin {
 
     this.addSettingTab(new ClaudeLauncherSettingTab(this.app, this));
 
+    // obsidian://claude-launcher?attach=<id> otwiera sesję w tle (claude attach) w karcie
+    // terminala. Korzysta z tego np. zewnętrzny panel sesji. Druga prośba o tę samą sesję
+    // przełącza na już otwartą kartę zamiast stawiać kolejną.
+    this.attachedLeaves = new Map();
+    this.registerObsidianProtocolHandler('claude-launcher', (params) => {
+      const id = String(params.attach || '');
+      if (/^[a-z0-9-]{4,64}$/i.test(id)) this.attach(id);
+    });
+
     // Capture, żeby wyprzedzić handler klawiszy xterma, który zamienia Ctrl+V
     // na znak sterujący 0x16 zamiast wkleić schowek.
     if (currentPlatform() !== 'darwin') {
@@ -934,7 +945,28 @@ module.exports = class ClaudeLauncher extends Plugin {
   // Podmienia domyślny profil Terminala na własny TYLKO na czas odpalenia sesji,
   // a potem przywraca poprzedni. Terminal odczytuje profil synchronicznie przy
   // wykonaniu komendy, więc przywrócenie zaraz po niej jest bezpieczne.
-  async launch() {
+  async attach(id) {
+    const open = this.attachedLeaves.get(id);
+    if (open && open.view && open.view.emulator && open.view.containerEl.isConnected) {
+      this.app.workspace.revealLeaf(open);
+      this.app.workspace.setActiveLeaf(open, { focus: true });
+      return;
+    }
+    const before = this.collectEmulators();
+    await this.launch(id);
+    // karta z nowym emulatorem = nasza sesja; zapamiętujemy ją do ponownego przełączenia
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      let leaf = null;
+      this.app.workspace.iterateAllLeaves((l) => {
+        if (!leaf && l.view && l.view.emulator && !before.has(l.view.emulator)) leaf = l;
+      });
+      if (leaf) return void this.attachedLeaves.set(id, leaf);
+      await new Promise((resolve) => self.setTimeout(resolve, 150));
+    }
+  }
+
+  async launch(attachId) {
     const terminal = this.terminalPlugin();
     if (!terminal) {
       new Notice('Zainstaluj i włącz plugin Terminal — Claude Code Launcher go potrzebuje.', 8000);
@@ -948,9 +980,11 @@ module.exports = class ClaudeLauncher extends Plugin {
     }
 
     const before = this.collectEmulators();
-    const previous = await this.installProfile(terminal, true);
+    const previous = await this.installProfile(terminal, true, attachId);
     this.app.commands.executeCommandById(commandId);
     await this.restoreDefaultProfile(terminal, previous);
+    // profil wraca do zwykłej nowej sesji, żeby ikonka nie podłączała się do starej
+    if (attachId) await this.installProfile(terminal, false);
     if (currentPlatform() === 'win32') this.waitForNewTerminal(before);
   }
 
@@ -1060,7 +1094,7 @@ module.exports = class ClaudeLauncher extends Plugin {
 
   // Zapisuje profil w ustawieniach Terminala. Gdy makeDefault=true, zwraca poprzedni
   // defaultProfile do przywrócenia (albo undefined, gdy nie ma czego przywracać).
-  async installProfile(terminal, makeDefault) {
+  async installProfile(terminal, makeDefault, attachId) {
     const settings = terminal.settings;
     if (!settings || typeof settings.mutate !== 'function') {
       new Notice('Nieznana wersja pluginu Terminal — ustaw profil „Claude Code" ręcznie.', 8000);
@@ -1068,7 +1102,7 @@ module.exports = class ClaudeLauncher extends Plugin {
     }
 
     const previous = settings.value.defaultProfile;
-    const profile = buildProfile(this.settings, this.resolvePython(), estimateConsoleSize(this.app));
+    const profile = buildProfile({ ...this.settings, attach: attachId }, this.resolvePython(), estimateConsoleSize(this.app));
 
     try {
       await settings.mutate((draft) => {
