@@ -151,6 +151,7 @@ public static class ClResizer {
   [DllImport("user32.dll", SetLastError=true)] static extern bool GetWindowRect(IntPtr w, out RECT r);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr w, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
 
   // SWP_NOSIZE nie, SWP_NOMOVE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE — okno
   // konsoli jest ukryte i ma takie zostać, zmieniamy mu wyłącznie rozmiar.
@@ -190,9 +191,17 @@ public static class ClResizer {
       h = CreateFile("CONOUT$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
       if (h == IntPtr.Zero || h == new IntPtr(-1)) return 0;
 
-      // Dwa przebiegi, jak w resizerze pluginu Terminal: przeliczenie pikseli okna
-      // jest przybliżone, drugi przebieg dociąga do dokładnego rozmiaru.
-      for (int pass = 0; pass < 2; pass++) {
+      // Conhost liczy okno w prawdziwych pikselach, a PowerShell nie jest DPI-aware:
+      // przy skalowaniu ekranu (np. 125%) Windows podaje mu przeskalowane wymiary okna
+      // i przeliczenie na kolumny chybia o jedną (zgłoszenie: „73x40 zamiast 72x40”).
+      // Brak funkcji (Windows starszy niż 10 1607) zostawia stare zachowanie.
+      try { SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch (Exception) { }
+
+      // Kilka przebiegów z poprawką: po każdej zmianie odczytujemy, ile kolumn faktycznie
+      // wyszło, i korygujemy piksele o różnicę. Sama proporcja pikseli z poprzedniego
+      // rozmiaru potrafiła utknąć kolumnę obok celu.
+      int cellW = 0, cellH = 0, fixW = 0, fixH = 0;
+      for (int pass = 0; pass < 4; pass++) {
         CSBI info;
         if (!GetConsoleScreenBufferInfo(h, out info)) {
           LastError = "GetConsoleScreenBufferInfo, kod " + Marshal.GetLastWin32Error();
@@ -212,9 +221,21 @@ public static class ClResizer {
           int clientW = client.Right - client.Left, clientH = client.Bottom - client.Top;
           int frameW = frame.Right - frame.Left, frameH = frame.Bottom - frame.Top;
           if (clientW > 0 && clientH > 0) {
-            int w = clientW * cols / oldCols + (frameW - clientW);
-            int hgt = clientH * rows / oldRows + (frameH - clientH);
+            // Rozmiar komórki bierzemy z pierwszego odczytu: resztka pikseli poza pełnymi
+            // kolumnami jest węższa od komórki, więc dzielenie całkowite trafia dokładnie.
+            if (cellW == 0) {
+              cellW = Math.Max(1, clientW / oldCols);
+              cellH = Math.Max(1, clientH / oldRows);
+            } else {
+              fixW += (cols - oldCols) * cellW;
+              fixH += (rows - oldRows) * cellH;
+            }
+            // Pół komórki zapasu, żeby okno nie wyszło o piksel za wąskie na ostatnią kolumnę.
+            int w = cols * cellW + cellW / 2 + fixW + (frameW - clientW);
+            int hgt = rows * cellH + cellH / 2 + fixH + (frameH - clientH);
             SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, hgt, SWP_FLAGS);
+            // Conhost przelicza bufor po WM_SIZE; chwila oddechu, zanim go odczytamy.
+            System.Threading.Thread.Sleep(30);
           }
         }
 
@@ -467,6 +488,16 @@ function estimateConsoleSize(app) {
   };
 }
 
+// emulator.resize() Terminala dopasowuje xterm, a potem próbuje przeskalować konsolę
+// własnym resizerem Pythona. Ten jest u nas celowo wyłączony (pusty pythonExecutable),
+// więc drugi krok zawsze kończy się „Terminal resizer disabled”. xterm jest wtedy już
+// dopasowany, a konsolę skaluje nasz resizer — ten błąd tylko zaśmiecał logi.
+function warnUnlessResizerDisabled(context, error) {
+  const message = error && error.message ? error.message : String(error);
+  if (/resizer disabled/i.test(message)) return;
+  console.warn(`[claude-launcher] ${context}`, error);
+}
+
 // Trzyma konsolę Windows w tym samym rozmiarze co xterm. Jeden resizer na sesję;
 // gdy sesja się kończy albo widok znika, proces PowerShella idzie za nią.
 class ConsoleResizer {
@@ -606,7 +637,7 @@ class ConsoleResizer {
   nudge() {
     const { emulator } = this;
     const fit = emulator && typeof emulator.resize === 'function'
-      ? Promise.resolve(emulator.resize()).catch((error) => console.warn('[claude-launcher] refit przed poruszeniem konsoli', error))
+      ? Promise.resolve(emulator.resize()).catch((error) => warnUnlessResizerDisabled('refit przed poruszeniem konsoli', error))
       : Promise.resolve();
     fit.then(() => {
       if (this.disposed) return;
@@ -659,7 +690,7 @@ class ConsoleResizer {
     const { emulator } = this;
     if (emulator && typeof emulator.resize === 'function') {
       Promise.resolve(emulator.resize())
-        .catch((error) => console.warn('[claude-launcher] refit po zmianie monitora', error));
+        .catch((error) => warnUnlessResizerDisabled('refit po zmianie monitora', error));
     }
     this.prime();
   }
@@ -903,10 +934,30 @@ module.exports = class ClaudeLauncher extends Plugin {
     try {
       const now = this.readClipboardNow();
       const text = now !== null ? now : await navigator.clipboard.readText();
-      if (text) terminal.paste(text);
+      if (!text) return;
+      if (this.shouldForceBracketedPaste(terminal, text)) {
+        // Znacznika końca w środku tekstu nie przepuszczamy — zamknąłby wklejkę przedwcześnie.
+        const body = text.replace(/\x1b\[20[01]~/g, '').replace(/\r?\n/g, '\r');
+        console.log(`[claude-launcher] wklejanie: ${text.length} znaków, znaczniki wklejki wymuszone`);
+        terminal.input(`\x1b[200~${body}\x1b[201~`, true);
+        return;
+      }
+      terminal.paste(text);
     } catch (error) {
       console.error('[claude-launcher] nie udało się wkleić ze schowka', error);
     }
+  }
+
+  // Zgłoszenie z Windowsa 10: długa wklejka dochodziła do Claude'a w kilku kawałkach,
+  // pierwszy jako zwykłe pisanie, a raz zginął jej środek. Stary conhost nie przekazuje
+  // xtermowi włączenia trybu wklejki (DECSET 2004), więc xterm wysyła tekst bez znaczników
+  // i Claude zgaduje granice wklejki po tempie znaków. Gdy xterm sam ich nie doda,
+  // dokładamy je my — ale tylko dla tekstu wieloliniowego albo długiego.
+  shouldForceBracketedPaste(terminal, text) {
+    if (currentPlatform() !== 'win32' || typeof terminal.input !== 'function') return false;
+    const modes = terminal.modes;
+    if (modes && modes.bracketedPasteMode) return false;
+    return /[\r\n]/.test(text) || text.length > 200;
   }
 
   async copyFrom(terminal) {
