@@ -77,12 +77,6 @@ const STARTUP_MAX_NUDGES = 2;
 // Ile ms konsola stoi o kolumnę węższa, zanim wróci do rozmiaru xterma.
 const NUDGE_RESTORE_MS = 250;
 
-// Windows: wklejka dłuższa niż tyle znaków albo linii idzie do Claude'a przez plik.
-// W testach na Windowsie 10 bez strat dochodziło ~250 znaków, gubienie zaczynało się
-// powyżej ~600 — próg z zapasem poniżej tej granicy.
-const PASTE_VIA_FILE_CHARS = 400;
-const PASTE_VIA_FILE_LINES = 8;
-
 // Co ile ms sprawdzamy, czy w workspace pojawił się terminal z naszym profilem bez
 // resizera — np. przywrócony po restarcie Obsidiana.
 const RESIZER_SCAN_MS = 1500;
@@ -107,6 +101,16 @@ function currentPlatform() {
   if (ua.includes('Mac')) return 'darwin';
   if (ua.includes('Win')) return 'win32';
   return 'linux';
+}
+
+// Windows 10 i 11 zgłaszają się jako 10.0.x — rozróżnia je dopiero numer kompilacji.
+function isWindows10() {
+  try {
+    const build = parseInt(require('os').release().split('.')[2], 10);
+    return build > 0 && build < 22000;
+  } catch (error) {
+    return false;
+  }
 }
 
 function fullCommand(settings) {
@@ -435,7 +439,13 @@ function buildProfile(settings, pythonExecutable, consoleSize) {
     // Bez cudzysłowów świadomie: Terminal przepisuje argumenty do pliku .bat i escape'uje
     // w nim każdy `"`, więc zagnieżdżone cudzysłowy potrafią dojść do PowerShella połamane.
     const { cols, rows } = consoleSize || FALLBACK_CONSOLE_SIZE;
-    const prelude = `$null = & cmd.exe /c mode con: cols=${cols} lines=${rows}; `;
+    // Windows 10 (conhost 10.0.19041): w trybie pełnoekranowym Claude Code stara konsola
+    // przekazuje xtermowi tylko widoczny ekran — historia zapełnia się powtórzeniami
+    // i dziurami, przewijanie nie działa, a długie wklejki gubią początek. Zwykły tryb
+    // działa poprawnie. Zmienna ma pierwszeństwo przed ustawieniem `tui` i dotyczy tylko
+    // sesji z launchera. Windows 11 (kompilacja 22000+) zostaje z trybem pełnoekranowym.
+    const noFullscreen = isWindows10() ? '$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; ' : '';
+    const prelude = `${noFullscreen}$null = & cmd.exe /c mode con: cols=${cols} lines=${rows}; `;
     return {
       ...base,
       executable: 'powershell.exe',
@@ -941,65 +951,9 @@ module.exports = class ClaudeLauncher extends Plugin {
       const now = this.readClipboardNow();
       const text = now !== null ? now : await navigator.clipboard.readText();
       if (!text) return;
-      if (this.shouldPasteViaFile(terminal, text)) {
-        const reference = this.writePasteFile(text);
-        if (reference) {
-          console.log(`[claude-launcher] wklejanie: ${text.length} znaków przez plik ${reference.path}`);
-          new Notice('Długi tekst trafił do Claude\'a jako plik. Konsola Windowsa gubi długie wklejki.', 6000);
-          terminal.input(reference.mention, true);
-          return;
-        }
-      }
       terminal.paste(text);
     } catch (error) {
       console.error('[claude-launcher] nie udało się wkleić ze schowka', error);
-    }
-  }
-
-  // Zgłoszenie z Windowsa 10 (conhost 10.0.19041): długa wklejka dochodziła do Claude'a
-  // w kawałkach, a w części prób z ~4800 znaków zostawało ostatnie ~600 — reszta ginęła
-  // między terminalem a procesem claude.exe. Wymuszanie znaczników wklejki nie pomogło,
-  // a w VS Code (nowszy ConPTY) ten sam tekst dochodzi cały. Przez konsolę puszczamy więc
-  // tylko krótki odnośnik do pliku z treścią — tyle stary conhost przenosi bez strat.
-  shouldPasteViaFile(terminal, text) {
-    if (currentPlatform() !== 'win32' || typeof terminal.input !== 'function') return false;
-    return text.length > PASTE_VIA_FILE_CHARS || text.split(/\r?\n/).length > PASTE_VIA_FILE_LINES;
-  }
-
-  // Zapisuje treść w katalogu tymczasowym i zwraca odnośnik do wpisania w prompt.
-  // `@ścieżka` dołącza plik do wiadomości; ścieżki ze spacją (np. konto „Jan Kowalski”)
-  // podajemy zdaniem, bo bez spacji w ścieżce nie ma pewności, że wzmianka ją połknie.
-  writePasteFile(text) {
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const os = require('os');
-      const dir = path.join(os.tmpdir(), 'claude-launcher-wklejki');
-      fs.mkdirSync(dir, { recursive: true });
-      this.cleanPasteFiles(fs, path, dir);
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const file = path.join(dir, `wklejka-${stamp}.txt`);
-      fs.writeFileSync(file, text, 'utf8');
-      const mention = /\s/.test(file)
-        ? `(treść wklejki jest w pliku "${file}", przeczytaj go) `
-        : `@${file} `;
-      return { path: file, mention };
-    } catch (error) {
-      console.error('[claude-launcher] nie udało się zapisać wklejki do pliku', error);
-      return null;
-    }
-  }
-
-  // Wklejki starsze niż doba kasujemy przy kolejnej, żeby katalog nie puchł.
-  cleanPasteFiles(fs, path, dir) {
-    const limit = Date.now() - 24 * 60 * 60 * 1000;
-    for (const name of fs.readdirSync(dir)) {
-      try {
-        const file = path.join(dir, name);
-        if (fs.statSync(file).mtimeMs < limit) fs.unlinkSync(file);
-      } catch (error) {
-        console.warn('[claude-launcher]', error);
-      }
     }
   }
 
