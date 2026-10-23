@@ -221,6 +221,25 @@ public static class ClResizer {
         int oldRows = info.Window.Bottom - info.Window.Top + 1;
         if (oldCols == cols && oldRows == rows) return 1;
 
+        // Najpierw API bufora: na zwykłym buforze ustawia rozmiar dokładnie i jednym ruchem.
+        // Każda zmiana rozmiaru to przerysowanie Claude'a, a w zwykłym trybie (Windows 10)
+        // każde zostaje w historii terminala — stąd powielone logo przy starcie, gdy
+        // wcześniej przed tym krokiem szło jeszcze przybliżenie w pikselach.
+        // Bufor nie może być mniejszy od okna: przy zwężaniu najpierw okno, potem bufor,
+        // przy poszerzaniu odwrotnie. Osobno dla kolumn i dla wierszy.
+        if (oldCols < cols) { SetBuffer(h, cols, oldRows); SetWindow(h, cols, oldRows); }
+        else { SetWindow(h, cols, oldRows); SetBuffer(h, cols, oldRows); }
+        if (oldRows < rows) { SetBuffer(h, cols, rows); SetWindow(h, cols, rows); }
+        else { SetWindow(h, cols, rows); SetBuffer(h, cols, rows); }
+
+        if (!GetConsoleScreenBufferInfo(h, out info)) {
+          LastError = "GetConsoleScreenBufferInfo, kod " + Marshal.GetLastWin32Error();
+          return 2;
+        }
+        oldCols = info.Window.Right - info.Window.Left + 1;
+        oldRows = info.Window.Bottom - info.Window.Top + 1;
+        if (oldCols == cols && oldRows == rows) return 1;
+
         // Gdy Claude pracuje na alternatywnym buforze ekranu (tryb pełnoekranowy,
         // claude agents), SetConsoleWindowInfo i SetConsoleScreenBufferSize odmawiają.
         // Wtedy działa tylko to, co zrobiłby użytkownik: zmiana rozmiaru samego okna
@@ -248,13 +267,6 @@ public static class ClResizer {
             System.Threading.Thread.Sleep(30);
           }
         }
-
-        // Bufor nie może być mniejszy od okna: przy zwężaniu najpierw okno, potem bufor,
-        // przy poszerzaniu odwrotnie. Osobno dla kolumn i dla wierszy.
-        if (oldCols < cols) { SetBuffer(h, cols, oldRows); SetWindow(h, cols, oldRows); }
-        else { SetWindow(h, cols, oldRows); SetBuffer(h, cols, oldRows); }
-        if (oldRows < rows) { SetBuffer(h, cols, rows); SetWindow(h, cols, rows); }
-        else { SetWindow(h, cols, rows); SetBuffer(h, cols, rows); }
       }
 
       CSBI after;
@@ -578,7 +590,10 @@ class ConsoleResizer {
     this.prime();
     this.subscription = terminal.onResize(({ cols, rows }) => this.send(cols, rows));
     this.watchDpi();
-    this.watchStartupRedraw();
+    // Poruszenie konsolą po starcie prostuje obraz w trybie pełnoekranowym. Na Windowsie 10
+    // sesje idą w zwykłym trybie, gdzie każde przerysowanie zostaje w historii terminala —
+    // tam poruszenie dokładałoby tylko kolejne kopie logo Claude'a.
+    if (!isWindows10()) this.watchStartupRedraw();
     return true;
   }
 
