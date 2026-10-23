@@ -1004,7 +1004,10 @@ module.exports = class ClaudeLauncher extends Plugin {
   async attach(id) {
     const main = this.mainLeaf;
     const term = main && main.view && main.view.emulator && main.view.containerEl.isConnected ? main.view.emulator.terminal : null;
-    if (term && typeof term.input === 'function') {
+    // Podmiana w istniejącej karcie wpisuje linię w składni basha (job control, `[[ ]]`),
+    // a na Windowsie w karcie siedzi PowerShell, który odrzuca ją w całości — `claude attach`
+    // nie ruszał wcale. Na Windowsie każdy link otwiera więc nową kartę.
+    if (term && typeof term.input === 'function' && currentPlatform() !== 'win32') {
       this.app.workspace.revealLeaf(main);
       this.app.workspace.setActiveLeaf(main, { focus: true });
       term.input('\x1a', true);
