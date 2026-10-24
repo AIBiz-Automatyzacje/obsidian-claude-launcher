@@ -1025,8 +1025,16 @@ module.exports = class ClaudeLauncher extends Plugin {
     if (term && typeof term.input === 'function' && currentPlatform() !== 'win32') {
       this.app.workspace.revealLeaf(main);
       this.app.workspace.setActiveLeaf(main, { focus: true });
-      term.input('\x1a', true);
-      await new Promise((resolve) => self.setTimeout(resolve, 1200));
+      // Komendę wpisujemy dopiero, gdy w karcie widać shell po zawieszeniu („suspended”).
+      // Inaczej (Ctrl+Z nie zadziałał, np. sesja otwarta wewnątrz `claude agents`) tekst
+      // trafiłby do pola promptu sesji. Wtedy zostaje nowa karta.
+      let shell = false;
+      for (let i = 0; i < 2 && !shell; i++) {
+        term.input('\x1a', true);
+        await new Promise((resolve) => self.setTimeout(resolve, 1200));
+        shell = this.shellVisible(term);
+      }
+      if (!shell) { this.mainLeaf = null; return this.attach(id); }
       // `claude attach` po Ctrl+Z kończy się sam, ale `claude agents` zostaje zawieszony —
       // taki podgląd zamykamy (sesje w tle chodzą w demonie, nic nie tracą). Spacja na
       // początku: linia nie trafia do historii shella.
@@ -1045,6 +1053,17 @@ module.exports = class ClaudeLauncher extends Plugin {
       if (leaf) { this.mainLeaf = leaf; return; }
       await new Promise((resolve) => self.setTimeout(resolve, 150));
     }
+  }
+
+  shellVisible(term) {
+    const buf = term.buffer && term.buffer.active;
+    if (!buf) return false;
+    const end = buf.baseY + buf.cursorY;
+    for (let y = end; y >= Math.max(0, end - 6); y--) {
+      const line = buf.getLine(y);
+      if (line && /suspended/i.test(line.translateToString(true))) return true;
+    }
+    return false;
   }
 
   async launch(attachId) {
