@@ -391,10 +391,25 @@ while ($null -ne ($line = $reader.ReadLine())) {
 }
 `;
 
-// PowerShell dostaje skrypt jako -EncodedCommand, żeby stdin został wolny na
-// nasze komendy resize (przy -Command - skrypt zjadłby cały strumień wejściowy).
-function encodePowerShellCommand(script) {
-  return Buffer.from(script, 'utf16le').toString('base64');
+// PowerShell dostaje skrypt z pliku (-File), żeby stdin został wolny na nasze komendy
+// resize (przy -Command - skrypt zjadłby cały strumień wejściowy). Wcześniej szedł jako
+// -EncodedCommand, ale base64 z UTF-16 to ~2,7 znaku na znak skryptu: w 1.5.1-beta.1
+// linia poleceń przekroczyła limit Windowsa (32 767 znaków) i spawn padał z ENAMETOOLONG,
+// zostawiając konsolę bez skalowania. Plik nazywamy skrótem treści, więc każda wersja
+// skryptu ma własny, a BOM jest konieczny, by PowerShell 5.1 czytał polskie znaki jako UTF-8.
+function resizerScriptArgs() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const hash = require('crypto').createHash('sha1').update(RESIZER_PS).digest('hex').slice(0, 10);
+    const file = path.join(os.tmpdir(), `claude-launcher-resizer-${hash}.ps1`);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, `\ufeff${RESIZER_PS}`, 'utf8');
+    return ['-File', file];
+  } catch (error) {
+    console.error('[claude-launcher] nie udało się zapisać skryptu resizera, próbuję -EncodedCommand', error);
+    return ['-EncodedCommand', Buffer.from(RESIZER_PS, 'utf16le').toString('base64')];
+  }
 }
 
 // powershell.exe z przekierowanymi strumieniami potrafi mimo -OutputFormat Text
@@ -552,7 +567,7 @@ class ConsoleResizer {
     // Stdin i tak czytamy surowym StreamReaderem, więc Text niczego nie psuje.
     this.process = spawn(
       'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-InputFormat', 'Text', '-OutputFormat', 'Text', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodePowerShellCommand(RESIZER_PS)],
+      ['-NoProfile', '-NonInteractive', '-InputFormat', 'Text', '-OutputFormat', 'Text', '-ExecutionPolicy', 'Bypass', ...resizerScriptArgs()],
       { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true }
     );
 
