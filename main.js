@@ -162,6 +162,11 @@ public static class ClResizer {
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr w, out uint pid);
   [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct FONTEX {
+    public uint Size; public uint Font; public COORD FontSize; public int Family; public int Weight;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string Face;
+  }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetCurrentConsoleFontEx(IntPtr h, bool max, ref FONTEX info);
 
   // SWP_NOSIZE nie, SWP_NOMOVE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE — okno
   // konsoli jest ukryte i ma takie zostać, zmieniamy mu wyłącznie rozmiar.
@@ -250,14 +255,27 @@ public static class ClResizer {
           int clientW = client.Right - client.Left, clientH = client.Bottom - client.Top;
           int frameW = frame.Right - frame.Left, frameH = frame.Bottom - frame.Top;
           if (clientW > 0 && clientH > 0) {
-            // Rozmiar komórki bierzemy z pierwszego odczytu: resztka pikseli poza pełnymi
-            // kolumnami jest węższa od komórki, więc dzielenie całkowite trafia dokładnie.
+            // Korektę liczymy z rozmiaru BUFORA, nie widocznego okna. Gdy bufor jest większy
+            // od okna, conhost dokłada paski przewijania, które zjadają kolumnę-dwie widoku.
+            // Liczona z okna korekta poszerzała wtedy bufor jeszcze bardziej i rozjazd rósł
+            // z każdym przebiegiem (Windows 11: „35x35 zamiast 37x36, bufor 39x37”).
+            // Gdy bufor trafi w cel, mieści się w oknie, pasków nie ma i widok też trafia.
+            int bufCols = info.Size.X, bufRows = info.Size.Y;
             if (cellW == 0) {
-              cellW = Math.Max(1, clientW / oldCols);
-              cellH = Math.Max(1, clientH / oldRows);
+              // Rozmiar komórki najpierw z czcionki konsoli, a gdy jej nie podaje — z podziału
+              // okna (resztka pikseli poza pełnymi kolumnami jest węższa od komórki).
+              FONTEX font = new FONTEX();
+              font.Size = (uint)Marshal.SizeOf(typeof(FONTEX));
+              if (GetCurrentConsoleFontEx(h, false, ref font) && font.FontSize.X > 0 && font.FontSize.Y > 0) {
+                cellW = font.FontSize.X;
+                cellH = font.FontSize.Y;
+              } else {
+                cellW = Math.Max(1, clientW / oldCols);
+                cellH = Math.Max(1, clientH / oldRows);
+              }
             } else {
-              fixW += (cols - oldCols) * cellW;
-              fixH += (rows - oldRows) * cellH;
+              fixW += (cols - bufCols) * cellW;
+              fixH += (rows - bufRows) * cellH;
             }
             // Pół komórki zapasu, żeby okno nie wyszło o piksel za wąskie na ostatnią kolumnę.
             int w = cols * cellW + cellW / 2 + fixW + (frameW - clientW);
