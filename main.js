@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
   command: 'claude',
   skipPermissions: false,
   cwd: 'root',
+  windowsDisplay: 'auto',
 };
 
 // Terminal domyślnie startuje z followTheme, czyli podmienia paletę ANSI kolorami
@@ -111,6 +112,18 @@ function isWindows10() {
   } catch (error) {
     return false;
   }
+}
+
+// Czy sesje na Windowsie startują w zwykłym trybie wyświetlania Claude Code (bez pełnego
+// ekranu). „auto” = tylko Windows 10. Ręczne „classic” jest dla Windowsów 11, na których
+// pełny ekran i tak się rozjeżdża — zgłoszenie: Windows 11 zaktualizowany z dziesiątki
+// na starszym laptopie, gdzie zwykły tryb wyświetlał poprawnie, a pełny ekran nie.
+function useClassicRenderer(settings) {
+  if (currentPlatform() !== 'win32') return false;
+  const mode = settings && settings.windowsDisplay;
+  if (mode === 'classic') return true;
+  if (mode === 'claude') return false;
+  return isWindows10();
 }
 
 function fullCommand(settings) {
@@ -489,7 +502,7 @@ function buildProfile(settings, pythonExecutable, consoleSize) {
     // i dziurami, przewijanie nie działa, a długie wklejki gubią początek. Zwykły tryb
     // działa poprawnie. Zmienna ma pierwszeństwo przed ustawieniem `tui` i dotyczy tylko
     // sesji z launchera. Windows 11 (kompilacja 22000+) zostaje z trybem pełnoekranowym.
-    const noFullscreen = isWindows10() ? '$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; ' : '';
+    const noFullscreen = useClassicRenderer(settings) ? '$env:CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; ' : '';
     const prelude = `${noFullscreen}$null = & cmd.exe /c mode con: cols=${cols} lines=${rows}; `;
     return {
       ...base,
@@ -562,7 +575,8 @@ function warnUnlessResizerDisabled(context, error) {
 // Trzyma konsolę Windows w tym samym rozmiarze co xterm. Jeden resizer na sesję;
 // gdy sesja się kończy albo widok znika, proces PowerShella idzie za nią.
 class ConsoleResizer {
-  constructor(emulator) {
+  constructor(emulator, classic) {
+    this.classic = classic;
     this.emulator = emulator;
     this.process = null;
     this.disposed = false;
@@ -626,7 +640,7 @@ class ConsoleResizer {
     // Poruszenie konsolą po starcie prostuje obraz w trybie pełnoekranowym. Na Windowsie 10
     // sesje idą w zwykłym trybie, gdzie każde przerysowanie zostaje w historii terminala —
     // tam poruszenie dokładałoby tylko kolejne kopie logo Claude'a.
-    if (!isWindows10()) this.watchStartupRedraw();
+    if (!this.classic) this.watchStartupRedraw();
     return true;
   }
 
@@ -1005,9 +1019,22 @@ module.exports = class ClaudeLauncher extends Plugin {
     }
   }
 
+  // Schowek Electrona, tak jak przy wklejaniu. navigator.clipboard potrafił po cichu odmówić
+  // zapisu (zgłoszenie z Windowsa 11: Ctrl+C w zwykłym trybie nic nie kopiował).
   async copyFrom(terminal) {
     try {
-      await navigator.clipboard.writeText(terminal.getSelection());
+      const text = terminal.getSelection();
+      let done = false;
+      try {
+        const { clipboard } = require('electron');
+        if (clipboard && typeof clipboard.writeText === 'function') {
+          clipboard.writeText(text);
+          done = true;
+        }
+      } catch (error) {
+        done = false;
+      }
+      if (!done) await navigator.clipboard.writeText(text);
       terminal.clearSelection();
     } catch (error) {
       console.error('[claude-launcher] nie udało się skopiować zaznaczenia', error);
@@ -1203,7 +1230,7 @@ module.exports = class ClaudeLauncher extends Plugin {
   }
 
   async attachResizer(emulator) {
-    const resizer = new ConsoleResizer(emulator);
+    const resizer = new ConsoleResizer(emulator, useClassicRenderer(this.settings));
     this.resizers.add(resizer);
     const forget = () => {
       resizer.dispose();
@@ -1354,6 +1381,27 @@ class ClaudeLauncherSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    if (currentPlatform() === 'win32') {
+      new Setting(containerEl)
+        .setName('Tryb wyświetlania Claude Code (Windows)')
+        .setDesc(
+          'Automatyczny: na Windowsie 10 zwykły tryb, na Windowsie 11 według ustawienia /tui w Claude Code. ' +
+            'Jeśli tekst w terminalu się rozjeżdża albo nachodzi na siebie, wybierz „Zwykły”. ' +
+            'Zmiana działa od następnej sesji uruchomionej ikonką.'
+        )
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('auto', 'Automatyczny')
+            .addOption('classic', 'Zwykły (bez pełnego ekranu)')
+            .addOption('claude', 'Według ustawienia /tui w Claude Code')
+            .setValue(this.plugin.settings.windowsDisplay || 'auto')
+            .onChange(async (value) => {
+              this.plugin.settings.windowsDisplay = value;
+              await this.plugin.saveSettings();
+            })
+        );
+    }
 
     new Setting(containerEl)
       .setName('Profil w pluginie Terminal')
